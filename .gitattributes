@@ -1,2 +1,6 @@
+# Check every text file out with LF on every platform. Test vectors, specs and scripts are
+# compared byte for byte, so a CRLF checkout (Git for Windows' default) breaks them.
+* text=auto eol=lf
+*.cmd text eol=crlf
 # Fuzz inputs are raw bytes: never convert line endings.
 fuzz/corpus/** -text
