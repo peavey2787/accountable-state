@@ -6,7 +6,7 @@
 //! the affected ticks are re-simulated. Everything here is provisional: the
 //! certified state comes only from the asynchronous checkpoint pipeline, which
 //! rebases the timeline once an epoch is co-signed.
-use crate::{apply_tick, EdgeError, InputViolation, PublicRules};
+use crate::{apply_tick, EdgeError, InputViolation, StateMachine};
 use gv_core::PlayerId;
 use std::collections::VecDeque;
 
@@ -35,7 +35,7 @@ pub enum AdvanceError {
     Rules(EdgeError),
 }
 
-pub struct Timeline<R: PublicRules> {
+pub struct Timeline<R: StateMachine> {
     rules: R,
     roster: [PlayerId; 2],
     local: usize,
@@ -56,7 +56,7 @@ pub struct Timeline<R: PublicRules> {
     pub stats: TimelineStats,
 }
 
-impl<R: PublicRules> Timeline<R> {
+impl<R: StateMachine> Timeline<R> {
     pub fn new(
         rules: R,
         roster: [PlayerId; 2],

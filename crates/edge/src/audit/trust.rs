@@ -5,12 +5,12 @@
 //! anchored to signed heads (`Authenticator`s) that were authenticated *before* the crash and are
 //! held outside the snapshot: in the local pin file, and by peers and witnesses. If no anchor is
 //! available the result is an explicit `Unresolved` state, never a silent adoption.
-use super::fsync::sync_parent_dir;
+use super::fsync::replace_file;
 use super::log::{AuditLog, Authenticator, LogError};
 use gv_core::{Digest, MatchId, PlayerId};
 use sha2::{Digest as _, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::Path;
 
 const PINS_MAGIC: &[u8] = b"GV-TRUST-PINS/V1\0";
@@ -40,18 +40,7 @@ pub fn write_state(path: &Path, payload: &[u8]) -> io::Result<()> {
     framed.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     framed.extend_from_slice(payload);
     framed.extend_from_slice(&checksum(STATE_MAGIC, payload));
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(&framed)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    sync_parent_dir(path)
+    replace_file(path, &framed)
 }
 
 #[derive(Debug, PartialEq, Eq)]

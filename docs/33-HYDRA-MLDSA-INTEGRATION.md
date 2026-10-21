@@ -38,7 +38,7 @@ with the system OpenSSL (>= 3.5), and rejects tampered messages, signatures and 
 
 The sim runs at 60 Hz and never signs per tick. Signed objects: one input batch per epoch,
 one checkpoint per epoch, one log authenticator per epoch, plus rare challenges and responses.
-Measured on this machine with `gv-edge-p2p-demo bench-sig`:
+Measured on this machine with `cargo run --release -p gv-sig --example bench`:
 
 | Scheme | sign | verify | signature | key |
 |---|---|---|---|---|
@@ -49,7 +49,7 @@ Signing happens on the pipeline task, never on the 60 Hz sim path.
 ## License note
 
 `hydra-msg` / `hydra-crypto` are GPL-2.0-or-later. The workspace is MIT, but `gv-sig` is declared
-`GPL-2.0-or-later` and every binary that links it (including `gv-edge`, `gv-edge-p2p-demo`)
+`GPL-2.0-or-later` and every binary that links it (including `gv-edge` and `accountable-state`)
 is therefore distributed under GPL-2.0-or-later terms. Source-only use of the MIT crates that
 do not link `gv-sig` is unaffected. The `p2p-net` and Hydra git dependencies are pinned by
 `Cargo.lock`; check their licenses before redistributing binaries.

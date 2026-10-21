@@ -4,10 +4,10 @@
 use super::auditor::{AuditEvent, Auditor};
 use super::msg::PipeMsg;
 use super::pipeline::{PipeEvent, Pipeline, PipelineConfig};
-use crate::arena::ArenaRules;
 use crate::audit::failpoint::{self, Action};
 use crate::audit::journal::{FileTrustStore, TrustStore};
 use crate::audit::{AuditLog, Authenticator};
+use crate::testkit::GridRules;
 use crate::MatchReplica;
 use gv_core::PlayerId;
 use gv_sig::SigningKey;
@@ -48,7 +48,7 @@ fn copy_dir(from: &Path, to: &Path) {
 // Real pipeline: the egress gate itself.
 
 struct Duo {
-    pipes: [Pipeline<ArenaRules>; 2],
+    pipes: [Pipeline<GridRules>; 2],
     wire: [VecDeque<Vec<u8>>; 2],
     sent0: Vec<PipeMsg>,
     events0: Vec<PipeEvent>,
@@ -60,7 +60,7 @@ impl Duo {
     fn new(name: &str) -> Self {
         let dir = scratch(name);
         let roster = roster();
-        let rules = ArenaRules::new(roster);
+        let rules = GridRules::new(roster);
         let mk = |i: usize| {
             Pipeline::new(
                 keys()[i].clone(),
@@ -95,7 +95,7 @@ impl Duo {
                 let own = move |from: u64, to: u64| -> Option<Vec<u16>> {
                     (to <= now).then(|| {
                         (from..to)
-                            .map(|k| if k % 30 < 4 { crate::arena::UP } else { 0u16 })
+                            .map(|k| if k % 30 < 4 { crate::testkit::UP } else { 0u16 })
                             .collect()
                     })
                 };

@@ -1,28 +1,40 @@
 //! Signed inputs + Merkle inclusion + deterministic replay. No network finality.
 use gv_commitments::{commit_state, verify_membership, MerkleLog};
-use gv_core::{Digest, StateOpening};
-use gv_replay::{verify_transition, GameRules};
+use gv_core::{Digest, PlayerId, StateOpening};
+use gv_replay::{verify_transition, RuleError, StateMachine, ViolationCode};
 use gv_sig::SigningKey;
 use gv_transcript::SignedInput;
 
 struct ToyMovement;
-impl GameRules for ToyMovement {
+/// The state or input is not an 8-byte coordinate.
+const NONCANONICAL: ViolationCode = ViolationCode(1);
+/// A step larger than the input domain allows.
+const OUT_OF_DOMAIN: ViolationCode = ViolationCode(2);
+/// The coordinate would overflow.
+const OVERFLOW: ViolationCode = ViolationCode(3);
+
+impl StateMachine for ToyMovement {
     fn ruleset_hash(&self) -> Digest {
         [9; 32]
     }
-    fn apply(&self, previous: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
-        if previous.len() != 8 || input.len() != 8 {
-            return Err("noncanonical coordinate".into());
-        }
-        let x = i64::from_le_bytes(previous.try_into().map_err(|_| "state")?);
-        let delta = i64::from_le_bytes(input.try_into().map_err(|_| "input")?);
+    fn genesis(&self, _: &[PlayerId; 2]) -> Vec<u8> {
+        0i64.to_le_bytes().to_vec()
+    }
+    fn apply(&self, previous: &[u8], input: &[u8]) -> Result<Vec<u8>, RuleError> {
+        let coordinate = |b: &[u8]| {
+            b.try_into()
+                .map(i64::from_le_bytes)
+                .map_err(|_| RuleError::InvalidAction(NONCANONICAL))
+        };
+        let x = coordinate(previous)?;
+        let delta = coordinate(input)?;
         if !(-5..=5).contains(&delta) {
-            return Err("movement outside accepted input domain".into());
+            return Err(RuleError::InvalidAction(OUT_OF_DOMAIN));
         }
-        Ok(x.checked_add(delta)
-            .ok_or("overflow")?
-            .to_le_bytes()
-            .to_vec())
+        let next = x
+            .checked_add(delta)
+            .ok_or(RuleError::InvalidAction(OVERFLOW))?;
+        Ok(next.to_le_bytes().to_vec())
     }
 }
 fn main() {

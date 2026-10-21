@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "accountable-state"
+version = "0.1.0"
+dependencies = [
+ "gv-core",
+ "gv-edge",
+ "gv-p2p",
+ "gv-replay",
+ "gv-sig",
+]
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1315,22 +1326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gv-edge-p2p-demo"
-version = "0.1.0"
-dependencies = [
- "gv-codec",
- "gv-commitments",
- "gv-core",
- "gv-edge",
- "gv-p2p",
- "gv-replay",
- "gv-sig",
- "hydra-msg",
- "p2p-net",
- "tokio",
-]
-
-[[package]]
 name = "gv-movement"
 version = "0.1.0"
 dependencies = [
@@ -1339,13 +1334,6 @@ dependencies = [
  "gv-replay",
  "gv-sig",
  "gv-transcript",
-]
-
-[[package]]
-name = "gv-multiplayer-combat"
-version = "0.1.0"
-dependencies = [
- "gv-core",
 ]
 
 [[package]]
@@ -1385,20 +1373,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gv-sdk"
-version = "0.1.0"
-dependencies = [
- "gv-codec",
- "gv-commitments",
- "gv-core",
- "gv-edge",
- "gv-privacy",
- "gv-replay",
- "gv-transcript",
- "gv-zk",
-]
-
-[[package]]
 name = "gv-sig"
 version = "0.1.0"
 dependencies = [
@@ -1417,13 +1391,6 @@ dependencies = [
  "gv-commitments",
  "gv-core",
  "gv-sig",
-]
-
-[[package]]
-name = "gv-turn-based"
-version = "0.1.0"
-dependencies = [
- "gv-core",
 ]
 
 [[package]]

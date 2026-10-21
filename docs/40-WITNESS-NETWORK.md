@@ -2,7 +2,7 @@
 
 Third-party witnesses relay and independently verify accountability evidence over the real
 `p2p-net` + `hydra-msg` transport (protocol magic `GV-WITNESS/V1\0`, `crates/edge/src/witness.rs`,
-runner `examples/edge-p2p/src/witness_net.rs`). Witnesses are never gameplay authorities: they
+a native runner is in the [anti-cheat](https://github.com/peavey2787/anti-cheat) repository). Witnesses are never gameplay authorities: they
 see no inputs, sign no state, and 1v1 works without them.
 
 ## Protocol

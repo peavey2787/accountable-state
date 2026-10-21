@@ -53,4 +53,4 @@ For decentralized **1v1**, quorum-based BFT over only two participants cannot gu
 
 ## r4 bilateral prototype, not BFT
 
-The `gv-edge` 1v1 demonstration uses bilateral signed batch admission and co-signed checkpoints. This guarantees that a single client cannot produce a *mutually certified* next checkpoint without the other signing, but cannot guarantee liveness or timely inclusion against one malicious peer. For 3+ or permissionless participants, the BFT/consensus mechanisms described above remain unimplemented. Details: [23](23-EDGE-P2P-PROOF-OF-CONCEPT.md).
+The `gv-edge` 1v1 demonstration uses bilateral signed batch admission and co-signed checkpoints. This guarantees that a single client cannot produce a *mutually certified* next checkpoint without the other signing, but cannot guarantee liveness or timely inclusion against one malicious peer. For 3+ or permissionless participants, the BFT/consensus mechanisms described above remain unimplemented. Details: [24](24-BILATERAL-ADMISSION-AND-EDGE-RECOVERY.md).

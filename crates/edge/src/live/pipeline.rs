@@ -15,8 +15,8 @@ use super::auditor::{Answers, AuditEvent, Auditor};
 use super::msg::{Opening, PipeMsg, SignedHide};
 use crate::{
     verify_checkpoint_evidence_with, BatchCommitment, BilateralAdmission, CheckpointEvidence,
-    EdgeError, EvidenceVerdict, InputViolation, MatchReplica, PublicRules, SignedBatchCommitment,
-    SignedCheckpoint, SignedEpochLock,
+    EdgeError, EvidenceVerdict, InputViolation, MatchReplica, SignedBatchCommitment,
+    SignedCheckpoint, SignedEpochLock, StateMachine,
 };
 use gv_codec::{ControlChange, PackedControls, SignedPackedControls};
 use gv_core::{Digest, MatchId, PlayerId};
@@ -165,7 +165,7 @@ enum Stage {
     Paired(Box<Paired>),
 }
 
-pub struct Pipeline<R: PublicRules + Clone> {
+pub struct Pipeline<R: StateMachine + Clone> {
     key: SigningKey,
     me: PlayerId,
     other: PlayerId,
@@ -230,7 +230,7 @@ fn pack(
     SignedPackedControls::sign(record, key).ok()
 }
 
-impl<R: PublicRules + Clone> Pipeline<R> {
+impl<R: StateMachine + Clone> Pipeline<R> {
     pub fn new(
         key: SigningKey,
         roster: [PlayerId; 2],
@@ -1040,7 +1040,7 @@ impl From<EdgeError> for PipeEvent {
 
 /// Answers for challenge kinds that need replica data (replay evidence, Merkle
 /// witnesses, hidden reveals).
-struct ReplicaAnswers<'a, R: PublicRules + Clone> {
+struct ReplicaAnswers<'a, R: StateMachine + Clone> {
     replica: &'a MatchReplica<R>,
     rules: &'a R,
     roster: [PlayerId; 2],
@@ -1048,7 +1048,7 @@ struct ReplicaAnswers<'a, R: PublicRules + Clone> {
     me: PlayerId,
 }
 
-impl<R: PublicRules + Clone> ReplicaAnswers<'_, R> {
+impl<R: StateMachine + Clone> ReplicaAnswers<'_, R> {
     fn epoch_at(&self, tick: u64) -> Option<&crate::Epoch> {
         self.replica.accepted().iter().find(|e| {
             e.signatures.is_some()
@@ -1058,7 +1058,7 @@ impl<R: PublicRules + Clone> ReplicaAnswers<'_, R> {
     }
 }
 
-impl<R: PublicRules + Clone> Answers for ReplicaAnswers<'_, R> {
+impl<R: StateMachine + Clone> Answers for ReplicaAnswers<'_, R> {
     fn answer(&self, c: &crate::audit::Challenge) -> Option<Vec<u8>> {
         use crate::audit::ChallengeKind as K;
         match c.kind {

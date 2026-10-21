@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 use super::{
     verify_checkpoint_evidence_with, CertifiedEpoch, CheckpointEvidence, EdgeError,
-    EvidenceVerdict, MatchReplica, PublicRules,
+    EvidenceVerdict, MatchReplica, StateMachine,
 };
 use gv_core::{MatchId, PlayerId};
 
@@ -206,7 +206,7 @@ impl CertifiedMatch {
     }
     /// Replay from a match ID, known ruleset and authenticated player roster.
     /// This accepts NO unauthenticated snapshots and validates EVERY predecessor.
-    pub fn restore<R: PublicRules>(
+    pub fn restore<R: StateMachine>(
         &self,
         match_id: MatchId,
         roster: [PlayerId; 2],
@@ -257,7 +257,7 @@ impl CertifiedMatch {
     /// Advance over a disputed epoch: the proof must show a signed claim for exactly this
     /// position that replay of the signed inputs refutes. The honest replay result becomes the
     /// chain head, so the continuation is linked to it and not to anything either player signed.
-    fn apply_dispute<R: PublicRules>(
+    fn apply_dispute<R: StateMachine>(
         &self,
         replica: &mut MatchReplica<R>,
         match_id: MatchId,

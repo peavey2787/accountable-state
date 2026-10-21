@@ -28,4 +28,4 @@ See [integration contract](04-game-integration.md) for the full list. The irredu
 
 ## Edge-executed engine and accountability
 
-The real-time engine is in [32](32-REALTIME-60HZ-ENGINE.md); signatures in [33](33-HYDRA-MLDSA-INTEGRATION.md) and [34](34-WIRE-FORMATS.md); accountability in [35](35-ACCOUNTABILITY-GUARANTEES.md) and [36](36-CHALLENGES-WITNESSES-EVIDENCE.md); export, recovery, witness network and formal model in [38](38-EVIDENCE-EXPORT.md)–[41](41-FORMAL-MODEL.md). The optional native transport uses the default Git branches of `p2p-net` and `hydra-msg`.
+The real-time engine and its measurements are documented with the [anti-cheat arena](https://github.com/peavey2787/anti-cheat); signatures in [33](33-HYDRA-MLDSA-INTEGRATION.md) and [34](34-WIRE-FORMATS.md); accountability in [35](35-ACCOUNTABILITY-GUARANTEES.md) and [36](36-CHALLENGES-WITNESSES-EVIDENCE.md); export, recovery, witness network and formal model in [38](38-EVIDENCE-EXPORT.md)–[41](41-FORMAL-MODEL.md). The optional native transport uses the default Git branches of `p2p-net` and `hydra-msg`.

@@ -1,19 +1,20 @@
 use super::*;
+use crate::testkit::{self as grid, GridRules, GridState};
 use gv_codec::{ControlChange, PackedControls, SignedPackedControls};
 use gv_core::{Digest, PlayerId};
-use gv_replay::{GameRules, RuleError};
+use gv_replay::StateMachine;
 use gv_sig::SigningKey;
 
 /// Deterministic blind for tests only; production draws 32 bytes from the OS CSPRNG.
 fn test_blind(player: &PlayerId) -> Digest {
     *player
 }
-fn setup() -> (SigningKey, SigningKey, [PlayerId; 2], ArenaRules) {
+fn setup() -> (SigningKey, SigningKey, [PlayerId; 2], GridRules) {
     let a = SigningKey::from_seed([31; 32]);
     let b = SigningKey::from_seed([41; 32]);
     let mut roster = [a.id(), b.id()];
     roster.sort();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     (a, b, roster, rules)
 }
 fn batch(
@@ -43,7 +44,7 @@ fn batch(
     .unwrap()
 }
 fn certified_epoch(
-    replica: &mut MatchReplica<ArenaRules>,
+    replica: &mut MatchReplica<GridRules>,
     a: &SigningKey,
     b: &SigningKey,
     mut pair: [SignedPackedControls; 2],
@@ -110,11 +111,11 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
             id,
             0,
             [0; 32],
-            arena::UP,
+            grid::UP,
             if alice.id() == roster[0] {
-                arena::RIGHT
+                grid::RIGHT
             } else {
-                arena::LEFT
+                grid::LEFT
             },
         ),
         batch(
@@ -122,11 +123,11 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
             id,
             0,
             [0; 32],
-            arena::UP,
+            grid::UP,
             if bob.id() == roster[0] {
-                arena::RIGHT
+                grid::RIGHT
             } else {
-                arena::LEFT
+                grid::LEFT
             },
         ),
     ];
@@ -135,16 +136,16 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
     // Hedged ML-DSA signatures differ run to run; the certified head must not.
     assert_eq!(first.checkpoint_hash(), also.checkpoint_hash());
     assert_eq!(p.state(), q.state());
-    let state = ArenaState::decode(p.state()).unwrap();
-    assert_eq!(state.fighters[0].y, -1);
-    assert_eq!(state.fighters[1].y, -1);
+    let state = GridState::decode(p.state()).unwrap();
+    assert_eq!(state.walkers[0].y, -1);
+    assert_eq!(state.walkers[1].y, -1);
     let epoch1 = [
         batch(
             &alice,
             id,
             4,
             p.next_batch_head(alice.id()).unwrap(),
-            arena::ATTACK,
+            grid::ACT,
             0,
         ),
         batch(
@@ -152,19 +153,15 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
             id,
             4,
             p.next_batch_head(bob.id()).unwrap(),
-            arena::ATTACK,
+            grid::ACT,
             0,
         ),
     ];
     let second = certified_epoch(&mut p, &alice, &bob, epoch1.clone());
     certified_epoch(&mut q, &alice, &bob, epoch1);
     assert_eq!(p.state(), q.state());
-    let hp = ArenaState::decode(p.state()).unwrap();
-    // At 60 Hz a fighter takes one step per 8 ticks, so after one epoch the
-    // players are still 8 columns apart: attacks are legal but out of range.
-    assert_eq!(hp.fighters[0].hp, 100);
-    assert_eq!(hp.fighters[1].hp, 100);
-    assert_eq!(hp.fighters[0].cooldown, arena::ATTACK_COOLDOWN_TICKS - 3);
+    let after = GridState::decode(p.state()).unwrap();
+    assert!(after.walkers.iter().all(|w| w.acts > 0));
     let accepted = CertifiedMatch {
         epochs: vec![first, second],
         disputes: vec![],
@@ -183,7 +180,7 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
             id,
             8,
             p.next_batch_head(alice.id()).unwrap(),
-            arena::ATTACK,
+            grid::ACT,
             0,
         ),
         batch(
@@ -191,7 +188,7 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
             id,
             8,
             p.next_batch_head(bob.id()).unwrap(),
-            arena::ATTACK,
+            grid::ACT,
             0,
         ),
     ];
@@ -312,17 +309,6 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
                 .1,
             Verified::Audit { .. }
         ));
-        // Feed never blocks and counts drops.
-        let mut feed = EvidenceFeed::new();
-        let sub = feed.subscribe(2).unwrap();
-        for _ in 0..10 {
-            feed.publish(&ExportEvent::Checkpoint {
-                epoch_start: 0,
-                hash: [0; 32],
-            });
-        }
-        assert_eq!(sub.dropped(), 8);
-        assert_eq!(sub.events.try_iter().count(), 2);
     }
     let mut fake = proof.clone();
     fake.allegation.accused.signature = fake.allegation.accused.signature.with_bit_flipped(0);
@@ -347,8 +333,8 @@ fn two_peers_two_epochs_fraud_bundle_and_recovery() {
 fn commit_lock_reveal_rejects_adversaries() {
     let (alice, bob, roster, rules) = setup();
     let id = [5; 32];
-    let a = batch(&alice, id, 0, [0; 32], arena::UP, arena::RIGHT);
-    let b = batch(&bob, id, 0, [0; 32], arena::UP, arena::LEFT);
+    let a = batch(&alice, id, 0, [0; 32], grid::UP, grid::RIGHT);
+    let b = batch(&bob, id, 0, [0; 32], grid::UP, grid::LEFT);
     let make = |signed: &SignedPackedControls, key: &SigningKey| {
         SignedBatchCommitment::sign(
             BatchCommitment::for_batch(
@@ -389,7 +375,7 @@ fn commit_lock_reveal_rejects_adversaries() {
         Err(AdmissionError::WrongPhase)
     );
     ad.admit_lock(ad.sign_lock(&bob).unwrap()).unwrap();
-    let changed = batch(&alice, id, 0, [0; 32], arena::DOWN, arena::LEFT);
+    let changed = batch(&alice, id, 0, [0; 32], grid::DOWN, grid::LEFT);
     assert_eq!(
         ad.admit_reveal(changed.clone(), &test_blind(&changed.record.player)),
         Err(AdmissionError::Mismatch)
@@ -413,7 +399,7 @@ fn commit_lock_reveal_rejects_adversaries() {
 fn batch_commitments_are_hiding_and_binding_under_an_explicit_blind() {
     let (alice, _, roster, rules) = setup();
     let id = [5; 32];
-    let a = batch(&alice, id, 0, [0; 32], arena::UP, arena::RIGHT);
+    let a = batch(&alice, id, 0, [0; 32], grid::UP, grid::RIGHT);
     let commit = |blind: Digest| {
         BatchCommitment::for_batch(&a, rules.ruleset_hash(), [0; 32], &blind).unwrap()
     };
@@ -426,14 +412,14 @@ fn batch_commitments_are_hiding_and_binding_under_an_explicit_blind() {
     // the tiny control-word space.
     assert_ne!(commit([1; 32]).blinded_batch_hash, a.digest().unwrap());
     // Binding: a different batch under the same blind differs; wrong blind fails to open.
-    let b2 = batch(&alice, id, 0, [0; 32], arena::DOWN, arena::RIGHT);
+    let b2 = batch(&alice, id, 0, [0; 32], grid::DOWN, grid::RIGHT);
     assert_ne!(
         BatchCommitment::blind_batch(&b2, &[1; 32]).unwrap(),
         commit([1; 32]).blinded_batch_hash
     );
     let signed = SignedBatchCommitment::sign(commit([1; 32]), &alice).unwrap();
     let bob = SigningKey::from_seed([41; 32]);
-    let other = batch(&bob, id, 0, [0; 32], arena::UP, arena::LEFT);
+    let other = batch(&bob, id, 0, [0; 32], grid::UP, grid::LEFT);
     let other_signed = SignedBatchCommitment::sign(
         BatchCommitment::for_batch(&other, rules.ruleset_hash(), [0; 32], &[9; 32]).unwrap(),
         &bob,
@@ -450,63 +436,6 @@ fn batch_commitments_are_hiding_and_binding_under_an_explicit_blind() {
     );
     ad.admit_reveal(a, &[1; 32]).unwrap();
 }
-#[test]
-fn arena_rejects_wall_over_speed_and_attack_cooldown() {
-    let (_, _, roster, rules) = setup();
-    let state = rules.genesis(&roster);
-    let mut input = Vec::new();
-    input.extend_from_slice(&roster[0]);
-    input.extend_from_slice(&0u64.to_le_bytes());
-    input.extend_from_slice(&(arena::LEFT | arena::RIGHT).to_le_bytes());
-    assert!(matches!(
-        rules.apply_for_verification(&state, &input),
-        Err(RuleError::InvalidAction(_))
-    ));
-    input[40..42].copy_from_slice(&arena::ATTACK.to_le_bytes());
-    let new = rules.apply_for_verification(&state, &input).unwrap();
-    // Held attacks during cooldown are legal controls, but cannot deal extra damage.
-    let cooled = rules.apply_for_verification(&new, &input).unwrap();
-    assert_eq!(
-        ArenaState::decode(&cooled).unwrap().fighters[0].cooldown,
-        arena::ATTACK_COOLDOWN_TICKS - 1
-    );
-    input[40..42].copy_from_slice(&0u16.to_le_bytes());
-    let mut state = cooled;
-    for _ in 0..2 {
-        state = rules.apply_for_verification(&state, &input).unwrap();
-    }
-    input[40..42].copy_from_slice(&arena::ATTACK.to_le_bytes());
-    assert!(rules.apply_for_verification(&state, &input).is_ok());
-}
-
-#[test]
-fn arena_wall_and_boundary_are_deterministic_noops() {
-    let (_, _, roster, rules) = setup();
-    let mut state = ArenaState::decode(&rules.genesis(&roster)).unwrap();
-    state.fighters[0].x = -1;
-    state.fighters[0].y = 0;
-    let mut input = Vec::new();
-    input.extend_from_slice(&roster[0]);
-    input.extend_from_slice(&0u64.to_le_bytes());
-    input.extend_from_slice(&arena::RIGHT.to_le_bytes());
-    let after = ArenaState::decode(
-        &rules
-            .apply_for_verification(&state.encode(), &input)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!((after.fighters[0].x, after.fighters[0].y), (-1, 0));
-    state.fighters[0].x = -8;
-    input[40..42].copy_from_slice(&arena::LEFT.to_le_bytes());
-    let after = ArenaState::decode(
-        &rules
-            .apply_for_verification(&state.encode(), &input)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(after.fighters[0].x, -8);
-}
-
 #[test]
 fn append_only_archive_is_byte_identical_to_a_full_encode() {
     let (alice, bob, roster, rules) = setup();
@@ -526,7 +455,7 @@ fn append_only_archive_is_byte_identical_to_a_full_encode() {
             id,
             start,
             replica.next_batch_head(alice.id()).unwrap(),
-            arena::UP,
+            grid::UP,
             0,
         );
         let b = batch(
@@ -534,7 +463,7 @@ fn append_only_archive_is_byte_identical_to_a_full_encode() {
             id,
             start,
             replica.next_batch_head(bob.id()).unwrap(),
-            arena::UP,
+            grid::UP,
             0,
         );
         let cert = certified_epoch(&mut replica, &alice, &bob, [a, b]);

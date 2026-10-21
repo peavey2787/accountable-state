@@ -6,7 +6,7 @@ use super::{
     verify_checkpoint_evidence_with, CheckpointError, CheckpointEvidence, Epoch, EvidenceVerdict,
 };
 use gv_core::{Digest, PlayerId};
-use gv_replay::GameRules;
+use gv_replay::StateMachine;
 
 const MAGIC: &[u8] = b"GV-CERTIFIED-EPOCH/V1\0";
 #[derive(Clone, Debug)]
@@ -82,7 +82,7 @@ impl CertifiedEpoch {
                 .map_err(|_| CheckpointError::InvalidEvidence)?,
         })
     }
-    pub fn verify<R: GameRules>(
+    pub fn verify<R: StateMachine>(
         &self,
         rules: &R,
         known_previous_checkpoint: Digest,
@@ -95,7 +95,7 @@ impl CertifiedEpoch {
             false,
         )
     }
-    pub fn verify_with<R: GameRules>(
+    pub fn verify_with<R: StateMachine>(
         &self,
         rules: &R,
         known_previous_checkpoint: Digest,

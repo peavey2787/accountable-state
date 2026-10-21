@@ -81,7 +81,7 @@ A single honest player may expose an authenticated *safety violation* and convin
 
 A separate question arises when the two parties disagree on whether an input was timely received, or one refuses to cooperate. Under arbitrary asynchrony and one Byzantine player, two-party communication alone cannot guarantee both agreement and progress. A cryptographic proof cannot invent a missing message. Options, chosen per game:
 
-1. **Bilateral signed admission (optimistic 1v1):** both acknowledge accepted input sets or periodic roots. Valid bilateral certificates are immutable evidence; a withholding party may force a timeout, a stalemate or a predefined forfeit; there is no unilateral finality for new conflicting sets. This is what the arena implements.
+1. **Bilateral signed admission (optimistic 1v1):** both acknowledge accepted input sets or periodic roots. Valid bilateral certificates are immutable evidence; a withholding party may force a timeout, a stalemate or a predefined forfeit; there is no unilateral finality for new conflicting sets. This is what the SDK implements.
 2. **Independent witnesses:** enrolled third parties relay and independently verify evidence ([36](36-CHALLENGES-WITNESSES-EVIDENCE.md)). They are never gameplay authorities and never vote on objective validity.
 3. **An agreed external ordering service:** a game may choose one for admission deadlines; it is outside this SDK.
 4. **Referee:** a host or server supplies admission and finality if the game opts in. A separate profile, not the decentralized default.

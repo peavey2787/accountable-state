@@ -2,14 +2,8 @@ use super::checkpoint::{Checkpoint, CheckpointError, SignedCheckpoint};
 use gv_codec::SignedPackedControls;
 use gv_commitments::{commit_state, MerkleLog};
 use gv_core::{Digest, MatchId, PlayerId, StateOpening};
-use gv_replay::{GameRules, RuleError};
+use gv_replay::{RuleError, StateMachine};
 use gv_sig::SigningKey;
-
-/// Public deterministic state is hashed with nonce zero. This MUST NOT be used
-/// to represent a secret state commitment: zero-nonce commits are not hiding.
-pub trait PublicRules: GameRules {
-    fn genesis(&self, roster: &[PlayerId; 2]) -> Vec<u8>;
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EdgeError {
@@ -40,7 +34,7 @@ pub struct InputViolation {
 /// replayed as neutral (control 0) and reported; every honest replayer and every
 /// independent verifier substitutes identically, so the resulting state is
 /// deterministic. Without it, an illegal action is an error (strict mode).
-pub fn apply_tick<R: GameRules>(
+pub fn apply_tick<R: StateMachine>(
     rules: &R,
     state: &[u8],
     player: &PlayerId,
@@ -55,10 +49,10 @@ pub fn apply_tick<R: GameRules>(
         input.extend_from_slice(&control.to_le_bytes());
         input
     };
-    match rules.apply_for_verification(state, &encode(control)) {
+    match rules.apply(state, &encode(control)) {
         Ok(next) => Ok((next, None)),
         Err(RuleError::InvalidAction(_)) if sanitize => rules
-            .apply_for_verification(state, &encode(0))
+            .apply(state, &encode(0))
             .map(|next| {
                 (
                     next,
@@ -84,7 +78,7 @@ pub struct Epoch {
     pub signatures: Option<[SignedCheckpoint; 2]>,
 }
 
-pub struct MatchReplica<R: PublicRules> {
+pub struct MatchReplica<R: StateMachine> {
     pub match_id: MatchId,
     pub roster: [PlayerId; 2],
     pub rules: R,
@@ -96,7 +90,7 @@ pub struct MatchReplica<R: PublicRules> {
     accepted: Vec<Epoch>,
     sanitize: bool,
 }
-impl<R: PublicRules> MatchReplica<R> {
+impl<R: StateMachine> MatchReplica<R> {
     pub fn new(match_id: MatchId, mut roster: [PlayerId; 2], rules: R) -> Result<Self, EdgeError> {
         roster.sort();
         if roster[0] == roster[1] {
@@ -278,7 +272,7 @@ impl<R: PublicRules> MatchReplica<R> {
         Ok(digest)
     }
 }
-impl<R: PublicRules> MatchReplica<R> {
+impl<R: StateMachine> MatchReplica<R> {
     /// Drop all but the newest `keep` accepted epochs. A long live match
     /// certifies thousands of epochs; the durable record is the receipt archive,
     /// so the replica only needs the chain head (state, tick, checkpoint hash).

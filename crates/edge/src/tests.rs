@@ -1,58 +1,46 @@
 use super::*;
 use gv_codec::{ControlChange, PackedControls, SignedPackedControls};
 use gv_core::{Digest, PlayerId};
-use gv_replay::{GameRules, RuleError};
+use gv_replay::{RuleError, StateMachine, ViolationCode};
 use gv_sig::SigningKey;
 
 #[derive(Clone)]
 struct MoveRules {
     roster: [PlayerId; 2],
 }
-impl GameRules for MoveRules {
+impl StateMachine for MoveRules {
     fn ruleset_hash(&self) -> Digest {
         [7; 32]
     }
-    fn apply(&self, s: &[u8], i: &[u8]) -> Result<Vec<u8>, String> {
-        self.apply_for_verification(s, i)
-            .map_err(|e| format!("{e:?}"))
+    fn genesis(&self, _: &[PlayerId; 2]) -> Vec<u8> {
+        vec![0; 16]
     }
-    fn apply_for_verification(&self, s: &[u8], i: &[u8]) -> Result<Vec<u8>, RuleError> {
+    fn apply(&self, s: &[u8], i: &[u8]) -> Result<Vec<u8>, RuleError> {
+        let invalid = || RuleError::InvalidAction(ViolationCode(1));
         if s.len() != 16 || i.len() != 42 {
-            return Err(RuleError::InvalidAction("bad state/input".into()));
+            return Err(invalid());
         }
-        let player: PlayerId = i[..32]
-            .try_into()
-            .map_err(|_| RuleError::InvalidAction("bad player".into()))?;
         let idx = self
             .roster
             .iter()
-            .position(|p| *p == player)
-            .ok_or(RuleError::InvalidAction("unauthorized".into()))?;
+            .position(|p| p[..] == i[..32])
+            .ok_or_else(invalid)?;
         let control = u16::from_le_bytes([i[40], i[41]]);
         if control & !3 != 0 || control == 3 {
-            return Err(RuleError::InvalidAction("bad control".into()));
+            return Err(invalid());
         }
         let mut out = s.to_vec();
         let mut xy = [0u8; 8];
         xy.copy_from_slice(&out[idx * 8..idx * 8 + 8]);
         let x = i64::from_le_bytes(xy);
-        let dx = if control == 1 {
-            1
-        } else if control == 2 {
-            -1
-        } else {
-            0
+        let dx = match control {
+            1 => 1,
+            2 => -1,
+            _ => 0,
         };
-        let new = x
-            .checked_add(dx)
-            .ok_or(RuleError::InvalidAction("overflow".into()))?;
+        let new = x.checked_add(dx).ok_or_else(invalid)?;
         out[idx * 8..idx * 8 + 8].copy_from_slice(&new.to_le_bytes());
         Ok(out)
-    }
-}
-impl PublicRules for MoveRules {
-    fn genesis(&self, _: &[PlayerId; 2]) -> Vec<u8> {
-        vec![0; 16]
     }
 }
 fn signed(

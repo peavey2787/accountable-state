@@ -186,7 +186,9 @@ fn interrupted_write_leaves_the_previous_state_intact() {
     let good = log_of(&a, 10, 0);
     store.save_log(&good).unwrap();
     // A crash after creating the temp file but before the rename leaves garbage next to it.
-    fs::write(store.log_path().with_extension("tmp"), b"half-written").unwrap();
+    let mut pending = store.log_path().into_os_string();
+    pending.push(".pending");
+    fs::write(&pending, b"half-written").unwrap();
     assert_eq!(store.load_log().ok().unwrap().head(), good.head());
     // Next successful save replaces everything atomically.
     let longer = log_of(&a, 20, 0);

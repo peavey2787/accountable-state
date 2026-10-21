@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 # In-memory trust store for tests and simulations only (no crash/rollback protection).
 ephemeral-store = []
+# Generic deterministic test state machine (protocol tests, fuzzing, SDK examples).
+testkit = []
 
 [dependencies]
 gv-core = { path = "../core" }

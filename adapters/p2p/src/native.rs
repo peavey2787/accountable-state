@@ -274,7 +274,7 @@ impl LiveLink {
             [only] => only.id(),
             _ => {
                 return Err(LiveError::Security(
-                    "multiple Hydra identities; use a dedicated arena profile".into(),
+                    "multiple Hydra identities; use a dedicated profile".into(),
                 ));
             }
         };

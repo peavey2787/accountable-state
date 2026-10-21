@@ -12,7 +12,7 @@ use crate::audit::{
     Authenticator, Challenge, ChallengeKind, Evidence, Ledger, Outcome, Response, Segment,
 };
 use crate::export::{verify_package, Package, TrustAnchor, Verified};
-use crate::PublicRules;
+use crate::StateMachine;
 use gv_core::{Digest, MatchId, PlayerId};
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 use sha2::{Digest as _, Sha256};
@@ -342,7 +342,7 @@ pub struct Stats {
     pub bytes_in: u64,
 }
 
-pub struct WitnessNode<R: PublicRules + Clone> {
+pub struct WitnessNode<R: StateMachine + Clone> {
     key: SigningKey,
     me: PlayerId,
     match_id: MatchId,
@@ -363,7 +363,7 @@ pub struct WitnessNode<R: PublicRules + Clone> {
     nonce: u64,
 }
 
-impl<R: PublicRules + Clone> WitnessNode<R> {
+impl<R: StateMachine + Clone> WitnessNode<R> {
     pub fn new(
         key: SigningKey,
         match_id: MatchId,

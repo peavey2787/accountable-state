@@ -1,7 +1,7 @@
 //! Witness propagation over an in-memory network with injected loss, duplication, reordering,
 //! delay and partitions. Cryptography is the real ML-DSA path; only the wire is simulated.
-use crate::arena::ArenaRules;
 use crate::audit::{AuditLog, Authenticator, ChallengeKind, Evidence, Status};
+use crate::testkit::GridRules;
 use crate::witness::{Event, Msg, Remote, WitnessNode};
 use gv_core::PlayerId;
 use gv_sig::SigningKey;
@@ -24,7 +24,7 @@ impl Rng {
 }
 
 struct Sim {
-    nodes: Vec<WitnessNode<ArenaRules>>,
+    nodes: Vec<WitnessNode<GridRules>>,
     inflight: VecDeque<(u64, usize, usize, Vec<u8>)>, // deliver_at, from, to, bytes
     now: u64,
     rng: Rng,
@@ -50,7 +50,7 @@ fn sim(c: &Cast, loss: u64, dup: u64, jitter: u64) -> Sim {
     let mut roster = [c.keys[0].id(), c.keys[1].id()];
     roster.sort();
     let wids: Vec<PlayerId> = c.keys[2..].iter().map(SigningKey::id).collect();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let mut nodes: Vec<_> = c
         .keys
         .iter()
@@ -138,12 +138,12 @@ fn equivocation(c: &Cast, who: usize) -> Evidence {
     x.append(1, vec![1]).unwrap();
     let mut y = a;
     y.append(1, vec![2]).unwrap();
-    let rs = ArenaRules::new({
+    let rs = GridRules::new({
         let mut r = [c.keys[0].id(), c.keys[1].id()];
         r.sort();
         r
     });
-    use gv_replay::GameRules;
+    use gv_replay::StateMachine;
     let r = rs.ruleset_hash();
     Evidence::ConflictingAuthenticators(x.sign_authenticator(r, k), y.sign_authenticator(r, k))
 }
@@ -185,8 +185,8 @@ fn malicious_witness_cannot_forge_a_verdict() {
         .latest_auth(&honest)
         .map_or([0u8; 32], |x| x.ruleset);
     let _ = r;
-    use gv_replay::GameRules;
-    let ruleset = ArenaRules::new({
+    use gv_replay::StateMachine;
+    let ruleset = GridRules::new({
         let mut x = [c.keys[0].id(), c.keys[1].id()];
         x.sort();
         x
@@ -241,7 +241,7 @@ fn unpinned_or_unadmitted_links_cannot_inject_anything() {
     let rogue = SigningKey::from_seed([99; 32]);
     let mut roster = [c.keys[0].id(), c.keys[1].id()];
     roster.sort();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let mut r = WitnessNode::new(rogue.clone(), M, roster, &[rogue.id()], rules);
     r.open_link(0, Remote::Player(c.keys[0].id()), 0);
     s.nodes[0].open_link(9, Remote::AnyWitness, 0);
@@ -323,8 +323,8 @@ fn witness_audits_a_player_log_and_silence_is_never_proof() {
     let p = c.keys[0].clone();
     let mut roster = [c.keys[0].id(), c.keys[1].id()];
     roster.sort();
-    use gv_replay::GameRules;
-    let ruleset = ArenaRules::new(roster).ruleset_hash();
+    use gv_replay::StateMachine;
+    let ruleset = GridRules::new(roster).ruleset_hash();
     let mut log = AuditLog::new(M, p.id());
     for i in 0..6u8 {
         log.append(1, vec![i]).unwrap();

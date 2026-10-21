@@ -1,8 +1,8 @@
 //! Export package tests: equivocation and audit paths, round trips, tampering, limits.
-use crate::arena::ArenaRules;
 use crate::audit::{compare_authenticators, AuditLog, Evidence};
 use crate::export::*;
-use gv_replay::GameRules as _;
+use crate::testkit::GridRules;
+use gv_replay::StateMachine as _;
 use gv_sig::SigningKey;
 
 const M: [u8; 32] = [7; 32];
@@ -11,14 +11,14 @@ fn setup() -> (
     SigningKey,
     SigningKey,
     [gv_core::PlayerId; 2],
-    ArenaRules,
+    GridRules,
     TrustAnchor,
 ) {
     let a = SigningKey::from_seed([1; 32]);
     let b = SigningKey::from_seed([2; 32]);
     let mut roster = [a.id(), b.id()];
     roster.sort();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let anchor = TrustAnchor {
         match_id: M,
         ruleset: rules.ruleset_hash(),
@@ -28,7 +28,7 @@ fn setup() -> (
 }
 
 /// Two heads signed for the same sequence number: the owner equivocated.
-fn forked(owner: &SigningKey, rules: &ArenaRules) -> Evidence {
+fn forked(owner: &SigningKey, rules: &GridRules) -> Evidence {
     let mut l1 = AuditLog::new(M, owner.id());
     let mut l2 = AuditLog::new(M, owner.id());
     for i in 0..4u64 {
@@ -193,29 +193,4 @@ fn commitments_never_claim_fraud_and_decode_strictly() {
     let mut cleared = enc.clone();
     cleared[26 + 3] = 0;
     assert!(Commitment::decode(&cleared).is_err());
-}
-
-#[test]
-fn feed_is_bounded_and_never_blocks() {
-    let mut feed = EvidenceFeed::new();
-    let subs: Vec<_> = (0..MAX_SUBSCRIBERS)
-        .map(|_| feed.subscribe(1).unwrap())
-        .collect();
-    assert!(feed.subscribe(1).is_none());
-    for i in 0..1000u64 {
-        feed.publish(&ExportEvent::Checkpoint {
-            epoch_start: i,
-            hash: [0; 32],
-        });
-    }
-    for s in &subs {
-        assert_eq!(s.events.try_iter().count(), 1);
-        assert_eq!(s.dropped(), 999);
-    }
-    drop(subs);
-    feed.publish(&ExportEvent::Checkpoint {
-        epoch_start: 0,
-        hash: [0; 32],
-    });
-    assert_eq!(feed.subscribers(), 0, "closed subscribers are removed");
 }

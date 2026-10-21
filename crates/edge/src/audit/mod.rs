@@ -5,7 +5,7 @@ pub mod challenge;
 pub mod durable;
 pub mod evidence;
 pub mod failpoint;
-mod fsync;
+pub mod fsync;
 pub mod journal;
 pub mod ledger;
 pub mod log;

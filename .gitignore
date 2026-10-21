@@ -20,9 +20,6 @@
 *.receipt.bin
 *.fraud.bin
 
-# Local arena demonstration credentials and receipts
-.arena-local/
-
 # Downloaded model-checking tools and TLC state (scripts/model-check.sh)
 .tla-tools/
 

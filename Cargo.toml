@@ -10,14 +10,11 @@ members = [
     "crates/replay",
     "crates/privacy",
     "crates/zk",
-    "crates/sdk",
+    "crates/accountable-state",
     "adapters/p2p",
     "adapters/wasm",
     "examples/movement",
-    "examples/edge-p2p",
-    "examples/packed-match",
-    "examples/turn-based",
-    "examples/multiplayer-combat"
+    "examples/packed-match"
 ]
 
 [workspace.package]
@@ -30,7 +27,7 @@ license = "MIT"
 sha2 = "0.10"
 
 # Hydra's password KDF takes ~45s per store open in an unoptimized build, which
-# starves the arena handshake/smoke-test timeouts. Optimize third-party crates
+# starves native handshake timeouts in tests. Optimize third-party crates
 # only; workspace crates keep fast debug builds and debug assertions.
 [profile.dev.package."*"]
 opt-level = 3

@@ -1,0 +1,24 @@
+[package]
+name = "accountable-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Accountable two-party state machines: signed, replayable, auditable execution with portable fraud evidence."
+
+[features]
+# Hooks that make this node misbehave on purpose (false checkpoints, equivocation, withheld
+# answers, false accusations), for demonstrations and tests of the accountability layer only.
+fault-injection = []
+# The native encrypted P2P transport (Hydra ML-DSA handshake over p2p-net).
+p2p = ["dep:gv-p2p"]
+
+[dependencies]
+gv-core = { path = "../core" }
+gv-edge = { path = "../edge" }
+gv-replay = { path = "../replay" }
+gv-sig = { path = "../sig" }
+gv-p2p = { path = "../../adapters/p2p", features = ["native"], optional = true }
+
+[dev-dependencies]
+gv-edge = { path = "../edge", features = ["testkit"] }

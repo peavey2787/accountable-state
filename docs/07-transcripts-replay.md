@@ -47,4 +47,4 @@ A replay verifier may decode a signed held-control stream into individual tick c
 
 ## Native edge demonstration
 
-See [23](23-EDGE-P2P-PROOF-OF-CONCEPT.md) for a two-player canonical loop where signed `GVEC` batches are sorted by authenticated player ID, expanded per tick, independently replayed by both clients, added to a SHA-256 Merkle log, and committed with *two* identical ML-DSA-65-signed checkpoints. Certified receipts are exportable. This is a bounded 1v1 public-state PoC, not the full generalized game ordering or durable streaming log.
+See the [anti-cheat arena](https://github.com/peavey2787/anti-cheat) for a two-player canonical loop where signed `GVEC` batches are sorted by authenticated player ID, expanded per tick, independently replayed by both clients, added to a SHA-256 Merkle log, and committed with *two* identical ML-DSA-65-signed checkpoints. Certified receipts are exportable. This is a bounded 1v1 public-state PoC, not the full generalized game ordering or durable streaming log.

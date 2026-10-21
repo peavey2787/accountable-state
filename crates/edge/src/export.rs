@@ -12,14 +12,11 @@
 use crate::audit::{Authenticator, Challenge, Evidence, Proof, Response, Segment};
 use crate::{
     evidence_violations, CertifiedMatch, CheckpointEvidence, EvidenceVerdict, FraudBundle,
-    PublicRules,
+    StateMachine,
 };
 use gv_core::{Digest, MatchId, PlayerId};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
 
 const PACKAGE_MAGIC: &[u8] = b"GV-EVIDENCE-PACKAGE/V1\0";
 const COMMITMENT_MAGIC: &[u8] = b"GV-EVIDENCE-COMMITMENT/V1\0";
@@ -320,12 +317,12 @@ impl Package {
     }
 }
 
-fn context<R: PublicRules>(rules: &R, roster: [PlayerId; 2]) -> (Digest, [PlayerId; 2]) {
+fn context<R: StateMachine>(rules: &R, roster: [PlayerId; 2]) -> (Digest, [PlayerId; 2]) {
     (rules.ruleset_hash(), sorted(roster))
 }
 
 /// Export a complete certified match: everything an independent party needs to replay it.
-pub fn export_match<R: PublicRules>(
+pub fn export_match<R: StateMachine>(
     rules: &R,
     match_id: MatchId,
     roster: [PlayerId; 2],
@@ -355,7 +352,7 @@ pub enum FraudWitness<'a> {
     Equivocation(&'a Evidence),
 }
 
-pub fn export_fraud<R: PublicRules>(
+pub fn export_fraud<R: StateMachine>(
     rules: &R,
     match_id: MatchId,
     roster: [PlayerId; 2],
@@ -520,7 +517,7 @@ impl AuditExport {
 }
 
 /// Export audit history. Evidence inside is re-verified on import; nothing is trusted.
-pub fn export_audit<R: PublicRules>(
+pub fn export_audit<R: StateMachine>(
     rules: &R,
     match_id: MatchId,
     roster: [PlayerId; 2],
@@ -571,7 +568,7 @@ pub enum Verified {
 }
 
 /// Verify a package from bytes with nothing but the pinned anchor and the ruleset.
-pub fn verify_package<R: PublicRules + Clone>(
+pub fn verify_package<R: StateMachine + Clone>(
     bytes: &[u8],
     anchor: &TrustAnchor,
     rules: &R,
@@ -588,7 +585,7 @@ pub fn verify_package<R: PublicRules + Clone>(
     Ok((pkg.commitment(), verified))
 }
 
-fn verify_payload<R: PublicRules + Clone>(
+fn verify_payload<R: StateMachine + Clone>(
     pkg: &Package,
     anchor: &TrustAnchor,
     rules: &R,
@@ -731,57 +728,4 @@ pub enum ExportEvent {
         challenge: Digest,
         status: crate::audit::Status,
     },
-}
-
-/// Bounded, non-blocking fan-out. A slow subscriber loses events (counted in
-/// [`Subscription::dropped`]); publishing never blocks and never allocates unboundedly.
-#[derive(Default)]
-pub struct EvidenceFeed {
-    subs: Vec<(SyncSender<ExportEvent>, Arc<AtomicU64>)>,
-}
-
-pub struct Subscription {
-    pub events: Receiver<ExportEvent>,
-    dropped: Arc<AtomicU64>,
-}
-
-impl Subscription {
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
-}
-
-pub const MAX_SUBSCRIBERS: usize = 16;
-
-impl EvidenceFeed {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// `capacity` is clamped to 1..=4096. Returns `None` past [`MAX_SUBSCRIBERS`].
-    pub fn subscribe(&mut self, capacity: usize) -> Option<Subscription> {
-        if self.subs.len() >= MAX_SUBSCRIBERS {
-            return None;
-        }
-        let (tx, rx) = sync_channel(capacity.clamp(1, 4096));
-        let dropped = Arc::new(AtomicU64::new(0));
-        self.subs.push((tx, dropped.clone()));
-        Some(Subscription {
-            events: rx,
-            dropped,
-        })
-    }
-    pub fn publish(&mut self, ev: &ExportEvent) {
-        self.subs
-            .retain(|(tx, dropped)| match tx.try_send(ev.clone()) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) => {
-                    dropped.fetch_add(1, Ordering::Relaxed);
-                    true
-                }
-                Err(TrySendError::Disconnected(_)) => false,
-            });
-    }
-    pub fn subscribers(&self) -> usize {
-        self.subs.len()
-    }
 }

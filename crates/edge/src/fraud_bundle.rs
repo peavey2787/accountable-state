@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 use super::{
     verify_checkpoint_evidence_with, CertifiedMatch, CheckpointError, CheckpointEvidence,
-    EdgeError, EvidenceVerdict, PublicRules,
+    EdgeError, EvidenceVerdict, StateMachine,
 };
 use gv_commitments::commit_state;
 use gv_core::{MatchId, PlayerId, StateOpening};
@@ -77,7 +77,7 @@ impl FraudBundle {
     }
     /// The verifier receives the match ID and BOTH player public keys through
     /// an independently trusted invitation / tournament manifest.
-    pub fn verify<R: PublicRules + Clone>(
+    pub fn verify<R: StateMachine + Clone>(
         &self,
         match_id: MatchId,
         roster: [PlayerId; 2],

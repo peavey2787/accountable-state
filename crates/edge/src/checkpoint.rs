@@ -1,7 +1,7 @@
 use gv_codec::SignedPackedControls;
 use gv_commitments::{commit_state, MerkleLog};
 use gv_core::{Digest, MatchId, PlayerId, StateOpening};
-use gv_replay::GameRules;
+use gv_replay::StateMachine;
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 use sha2::{Digest as _, Sha256};
 
@@ -181,7 +181,7 @@ pub enum EvidenceVerdict {
     Inconclusive(CheckpointError),
 }
 
-pub fn verify_checkpoint_evidence<R: GameRules>(
+pub fn verify_checkpoint_evidence<R: StateMachine>(
     rules: &R,
     proof: &CheckpointEvidence,
 ) -> EvidenceVerdict {
@@ -190,7 +190,7 @@ pub fn verify_checkpoint_evidence<R: GameRules>(
 
 /// `sanitize` selects live replay: an illegal control word is neutralized the
 /// same way the live engine did, instead of making the epoch unverifiable.
-pub fn verify_checkpoint_evidence_with<R: GameRules>(
+pub fn verify_checkpoint_evidence_with<R: StateMachine>(
     rules: &R,
     proof: &CheckpointEvidence,
     sanitize: bool,
@@ -378,7 +378,7 @@ impl CheckpointEvidence {
 
 /// Replay a (live) evidence epoch and list every illegal control word that was
 /// neutralized in it, each authenticated by its sender's batch signature.
-pub fn evidence_violations<R: GameRules>(
+pub fn evidence_violations<R: StateMachine>(
     rules: &R,
     proof: &CheckpointEvidence,
 ) -> Result<Vec<crate::InputViolation>, CheckpointError> {

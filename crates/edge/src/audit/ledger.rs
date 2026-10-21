@@ -5,7 +5,7 @@ use super::challenge::Status;
 use super::evidence::{Evidence, EvidenceError, Proof};
 use crate::{verify_checkpoint_evidence_with, CertifiedEpoch, CheckpointEvidence, EvidenceVerdict};
 use gv_core::{Digest, MatchId, PlayerId};
-use gv_replay::GameRules;
+use gv_replay::StateMachine;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -94,7 +94,7 @@ impl Ledger {
     /// A replay accusation: the checkpoint's signer claims a bad state transition.
     /// `rules` + trusted predecessor decide it; a wrong premise is INCONCLUSIVE and
     /// never records anything against the accused.
-    pub fn submit_replay<R: GameRules>(
+    pub fn submit_replay<R: StateMachine>(
         &mut self,
         rules: &R,
         e: &CheckpointEvidence,
@@ -113,7 +113,7 @@ impl Ledger {
     /// trusted predecessor and matches the accused claim shows the allegation is
     /// false. Exonerates the accusation id; counterproofs are final (no further
     /// accusation about the same premise, so no ping-pong).
-    pub fn counterproof<R: GameRules>(
+    pub fn counterproof<R: StateMachine>(
         &mut self,
         rules: &R,
         accusation: &CheckpointEvidence,

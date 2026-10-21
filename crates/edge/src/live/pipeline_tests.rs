@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use super::*;
-use crate::arena::{self, ArenaRules, ArenaState};
-use crate::{apply_tick, MatchReplica, PublicRules};
+use crate::testkit::{self as grid, GridRules, GridState};
+use crate::{apply_tick, MatchReplica, StateMachine};
 use gv_core::PlayerId;
 use gv_sig::SigningKey;
 use std::collections::VecDeque;
@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 const MATCH: [u8; 32] = [7; 32];
 
 struct Peer {
-    pipe: Pipeline<ArenaRules>,
+    pipe: Pipeline<GridRules>,
     script: Vec<u16>,
     events: Vec<(u64, PipeEvent)>,
     sent: Vec<(u64, PipeMsg)>,
@@ -40,7 +40,7 @@ fn roster() -> [PlayerId; 2] {
 
 fn net(scripts: [Vec<u16>; 2], cfg: PipelineConfig, delay: u64) -> Net {
     let roster = roster();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let mk = |i: usize, script: Vec<u16>| Peer {
         pipe: {
             let mut pipe = Pipeline::new(
@@ -142,7 +142,7 @@ impl Net {
 
 fn reference(scripts: &[Vec<u16>; 2], ticks: u64) -> Vec<u8> {
     let roster = roster();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let mut state = rules.genesis(&roster);
     let ctl = |p: usize, t: u64| {
         let key = keys()[p].id();
@@ -183,7 +183,7 @@ fn nobody_sends_anything_while_both_players_are_idle() {
 
 #[test]
 fn one_active_player_proposes_the_idle_one_answers_and_both_certify() {
-    let scripts = [held(arena::UP, 5, 9, 200), vec![]];
+    let scripts = [held(grid::UP, 5, 9, 200), vec![]];
     let mut n = net(scripts.clone(), PipelineConfig::default(), 3);
     n.run(200);
     let (a, b) = (n.finalized(0), n.finalized(1));
@@ -216,8 +216,8 @@ fn one_active_player_proposes_the_idle_one_answers_and_both_certify() {
 fn both_active_at_different_times_agree_on_the_shorter_epoch() {
     // A acts in cell 2 (ticks 40-59); B acts in cell 1 (ticks 20-39).
     let scripts = [
-        held(arena::RIGHT, 45, 50, 300),
-        held(arena::LEFT, 22, 26, 300),
+        held(grid::RIGHT, 45, 50, 300),
+        held(grid::LEFT, 22, 26, 300),
     ];
     for delay in [0, 1, 5, 12, 25] {
         let mut n = net(scripts.clone(), PipelineConfig::default(), delay);
@@ -247,7 +247,7 @@ fn both_active_at_different_times_agree_on_the_shorter_epoch() {
 
 #[test]
 fn a_false_signed_checkpoint_is_proven_on_both_sides_and_play_continues() {
-    let scripts = [held(arena::UP, 3, 60, 300), held(arena::DOWN, 10, 40, 300)];
+    let scripts = [held(grid::UP, 3, 60, 300), held(grid::DOWN, 10, 40, 300)];
     let mut n = net(scripts.clone(), PipelineConfig::default(), 2);
     n.run(10);
     n.peers[1].pipe.inject_cheat();
@@ -286,12 +286,12 @@ fn a_false_signed_checkpoint_is_proven_on_both_sides_and_play_continues() {
 
 #[test]
 fn a_signed_illegal_input_is_neutralized_proven_and_does_not_stall() {
-    let mut a = held(arena::RIGHT, 2, 6, 200);
+    let mut a = held(grid::RIGHT, 2, 6, 200);
     for x in &mut a[10..14] {
         *x = 128; // unsupported control word
     }
-    a[30] = arena::LEFT | arena::RIGHT; // contradictory
-    let scripts = [a, held(arena::DOWN, 4, 8, 200)];
+    a[30] = grid::LEFT | grid::RIGHT; // contradictory
+    let scripts = [a, held(grid::DOWN, 4, 8, 200)];
     let mut n = net(scripts.clone(), PipelineConfig::default(), 2);
     n.run(200);
     for i in 0..2 {
@@ -315,14 +315,14 @@ fn a_signed_illegal_input_is_neutralized_proven_and_does_not_stall() {
     // The evidence is a portable, independently checkable artifact.
     let ev = crate::CheckpointEvidence::decode(&n.violations(1)[0].evidence).unwrap();
     assert_eq!(
-        crate::verify_checkpoint_evidence_with(&ArenaRules::new(roster()), &ev, true),
+        crate::verify_checkpoint_evidence_with(&GridRules::new(roster()), &ev, true),
         crate::EvidenceVerdict::ValidClaim
     );
     // ... and exports as a self-verifying package that a third party checks with pinned facts only.
     {
         use crate::export::*;
-        use gv_replay::GameRules as _;
-        let rules = ArenaRules::new(roster());
+        use gv_replay::StateMachine as _;
+        let rules = GridRules::new(roster());
         let anchor = TrustAnchor {
             match_id: ev.accused.claim.match_id,
             ruleset: rules.ruleset_hash(),
@@ -356,12 +356,12 @@ fn busy(seed: u64, ticks: usize) -> Vec<u16> {
     let mut s = seed | 1;
     let pool = [
         0,
-        arena::LEFT,
-        arena::RIGHT,
-        arena::UP,
-        arena::DOWN,
-        arena::ATTACK,
-        arena::GUARD,
+        grid::LEFT,
+        grid::RIGHT,
+        grid::UP,
+        grid::DOWN,
+        grid::ACT,
+        grid::HOLD,
         0,
         0,
     ];
@@ -468,7 +468,7 @@ fn hidden_window_uses_commit_lock_reveal_and_leaks_nothing_until_the_end() {
             reference(&scripts, t).as_slice(),
             "delay {delay}"
         );
-        assert!(ArenaState::decode(n.peers[0].pipe.verified_state()).is_ok());
+        assert!(GridState::decode(n.peers[0].pipe.verified_state()).is_ok());
         // 5. Cooldown, then a second hide is allowed.
         assert!(
             matches!(
@@ -531,7 +531,7 @@ fn a_reveal_that_does_not_match_its_commitment_is_rejected() {
         .collect();
     for b in reveals {
         let mut rec = b.batch.record.clone();
-        rec.initial_state ^= arena::ATTACK;
+        rec.initial_state ^= grid::ACT;
         rec.changes.clear();
         let lie = gv_codec::SignedPackedControls::sign(rec, &key).unwrap();
         let now = n.now;
@@ -571,7 +571,7 @@ fn a_responder_whose_clock_lags_still_pairs_without_waiting_for_more_traffic() {
     // Regression: the lagging peer answers an "owed" proposal later, and that
     // answer alone must complete the pair. Previously it waited for unrelated
     // traffic, so one illegal-input tap stalled certification indefinitely.
-    let scripts = [held(arena::RIGHT, 45, 50, 400), vec![]];
+    let scripts = [held(grid::RIGHT, 45, 50, 400), vec![]];
     for skew in 1..=9u64 {
         for delay in [0, 2, 7] {
             let mut n = net(scripts.clone(), PipelineConfig::default(), delay);
@@ -585,9 +585,9 @@ fn a_responder_whose_clock_lags_still_pairs_without_waiting_for_more_traffic() {
         }
     }
     // Both lagging in either direction, both active, with an illegal word too.
-    let mut a = held(arena::UP, 3, 9, 400);
+    let mut a = held(grid::UP, 3, 9, 400);
     a[100] = 128;
-    let scripts = [a, held(arena::LEFT, 4, 7, 400)];
+    let scripts = [a, held(grid::LEFT, 4, 7, 400)];
     for skew in [[0, 3], [3, 0], [2, 5]] {
         let mut n = net(scripts.clone(), PipelineConfig::default(), 4);
         n.skew = skew;
@@ -629,8 +629,8 @@ fn statuses(n: &Net, i: usize) -> Vec<crate::audit::Status> {
 }
 fn busy_pair() -> [Vec<u16>; 2] {
     [
-        held(arena::UP, 0, 3000, 3000),
-        held(arena::LEFT, 0, 3000, 3000),
+        held(grid::UP, 0, 3000, 3000),
+        held(grid::LEFT, 0, 3000, 3000),
     ]
 }
 
@@ -880,13 +880,13 @@ fn archive_of(n: &Net, i: usize) -> crate::CertifiedMatch {
 #[test]
 fn archive_continues_past_a_disputed_epoch_and_verifies_independently() {
     use crate::export::{export_match, verify_package, DisclosurePolicy, TrustAnchor, Verified};
-    use gv_replay::GameRules as _;
-    let scripts = [held(arena::UP, 3, 60, 400), held(arena::DOWN, 10, 40, 400)];
+    use gv_replay::StateMachine as _;
+    let scripts = [held(grid::UP, 3, 60, 400), held(grid::DOWN, 10, 40, 400)];
     let mut n = net(scripts.clone(), PipelineConfig::default(), 2);
     n.run(10);
     n.peers[1].pipe.inject_cheat();
     n.run(390);
-    let rules = ArenaRules::new(roster());
+    let rules = GridRules::new(roster());
     for i in 0..2 {
         let archive = archive_of(&n, i);
         assert_eq!(archive.disputed(), 1, "peer {i}");
@@ -960,10 +960,10 @@ fn archive_continues_past_a_disputed_epoch_and_verifies_independently() {
 #[test]
 fn an_honest_epoch_cannot_be_relabelled_as_disputed() {
     // A proof must show a claim that replay refutes; a valid, co-signed claim is not one.
-    let scripts = [held(arena::UP, 3, 60, 200), held(arena::DOWN, 10, 40, 200)];
+    let scripts = [held(grid::UP, 3, 60, 200), held(grid::DOWN, 10, 40, 200)];
     let mut n = net(scripts, PipelineConfig::default(), 2);
     n.run(200);
-    let rules = ArenaRules::new(roster());
+    let rules = GridRules::new(roster());
     let honest = archive_of(&n, 0);
     assert_eq!(honest.disputed(), 0);
     let first = &honest.epochs[0];
@@ -1036,12 +1036,12 @@ fn soak_honest_pair_under_faults_pruning_and_delayed_challenges() {
                 if x % 37 == 0 {
                     cur = [
                         0,
-                        arena::UP,
-                        arena::DOWN,
-                        arena::LEFT,
-                        arena::RIGHT,
-                        arena::ATTACK,
-                        arena::GUARD,
+                        grid::UP,
+                        grid::DOWN,
+                        grid::LEFT,
+                        grid::RIGHT,
+                        grid::ACT,
+                        grid::HOLD,
                     ][(x >> 8) as usize % 7];
                 }
                 v.push(cur);

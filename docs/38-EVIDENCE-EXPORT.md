@@ -1,6 +1,6 @@
 # 38 — Chain-agnostic evidence export
 
-One interface exports, imports, independently verifies and streams evidence. It lives in `gv_edge::export` and has **no** network, wallet or blockchain dependency. A package is plain bytes: store it in a file, an object store, a message queue or any settlement system.
+One interface exports, imports, independently verifies and streams evidence. It lives in `gv_edge::export`, is reached through `AccountableState::export` and `Verifier::verify_package`, and has **no** network, wallet or blockchain dependency. A package is plain bytes: store it in a file, an object store, a message queue or any settlement system.
 
 > **Publishing a hash is not fraud verification.** A `Commitment` proves only that someone published 32 bytes. Fraud is established solely by running `verify_package` on the package itself with the pinned match id, ruleset and roster. Every commitment carries a `publication_only` byte that decoders require to be set.
 
@@ -12,7 +12,7 @@ One interface exports, imports, independently verifies and streams evidence. It 
 | `export_fraud` | `FraudWitness` | The smallest sufficient witness: `FalseCheckpoint` (`FraudBundle`), `IllegalInput` (`CheckpointEvidence`) or `Equivocation` (`audit::Evidence`) |
 | `export_audit` | `Audit` | Signed authenticators, log segments, challenges, responses and evidence for audit; every record is re-verified on import |
 | `Package::commitment` | `Commitment` | Compact 32-byte id plus kind, fraud kind, match id and ruleset; `Commitment::WIRE_SIZE` bytes |
-| `EvidenceFeed` | live stream | Bounded, non-blocking fan-out of `ExportEvent::{Evidence, Checkpoint}` |
+| `AccountableState::subscribe` | event feed | Signed, numbered, durable `ExportEvent::{Evidence, Audit, Checkpoint}` |
 
 ## Encoding
 
@@ -28,30 +28,26 @@ One interface exports, imports, independently verifies and streams evidence. It 
 
 * `inputs_releasable`: signed input batches (and so every player's controls) may be released.
 * `permanently_secret_state`: the game promises that some state stays secret after play. Match archives and any witness that contains input history are then refused with `ExportError::DisclosureForbidden`.
-* `DisclosurePolicy::PUBLIC` is for public-state games (the arena). Equivocation evidence made of signed heads alone does not disclose inputs and exports under any policy; evidence made of conflicting signed input batches does.
+* `DisclosurePolicy::PUBLIC` is for public-state games (such as the anti-cheat arena). Equivocation evidence made of signed heads alone does not disclose inputs and exports under any policy; evidence made of conflicting signed input batches does.
 
 ## Verification
 
 ```rust
-let anchor = TrustAnchor { match_id, ruleset: rules.ruleset_hash(), roster };
-let (commitment, verdict) = verify_package(&bytes, &anchor, &rules)?;
-// verdict: Verified::Fraud { kind, accused } | Verified::Match { ticks, epochs } | Verified::Audit { .. }
+let verifier = Verifier::new(TrustAnchor { match_id, ruleset: rules.ruleset_hash(), roster });
+match verifier.verify_package(&bytes, &rules) {
+    VerificationResult::ProvenViolation(proof) => { /* proof.kind, proof.accused */ }
+    VerificationResult::Valid(record) => { /* a match archive or a clean audit record */ }
+    VerificationResult::Inconclusive(reason) => { /* proves nothing either way */ }
+}
 ```
 
-`verify_package` rejects with `WrongContext` (other match, ruleset or roster), `Malformed`, `TooLarge`, `Invalid` (a signature, chain or replay failed) or `NotAViolation` (well formed, but it proves nothing: a valid claim, an honest extension, a lawful input). A signature that verifies is never enough on its own; the semantic check (replay, conflict, rule violation) must also hold.
+`Inconclusive` carries the reason: `WrongContext` (other match, ruleset or roster), `Malformed`, `TooLarge`, `Invalid` (a signature, chain or replay failed) or `NotAViolation` (well formed, but it proves nothing: a valid claim, an honest extension, a lawful input). A signature that verifies is never enough on its own; the semantic check (replay, conflict, rule violation) must also hold. An audit record carrying verified equivocation is a `ProvenViolation`.
 
-A runnable independent verifier:
+A runnable command-line verifier for the arena ruleset lives in [anti-cheat](https://github.com/peavey2787/anti-cheat).
 
-```bash
-cargo run -p gv-edge --example verify_package -- package.bin <match-id-hex> alice.pub bob.pub
-# PROVEN FalseCheckpoint by player 1f3a…  package 9c0d…
-```
+## Event feed
 
-`gv-edge-p2p-demo verify` accepts the same package and prints the same verdict.
-
-## Live stream
-
-`EvidenceFeed::subscribe(capacity)` returns a `Subscription` (bounded `std::sync::mpsc` channel, capacity clamped to 1..=4096, at most 16 subscribers). `publish` uses `try_send`: a slow or absent consumer loses events (counted in `Subscription::dropped`) and never blocks the pipeline or the 60 Hz simulation. Events are hints; the authoritative record is the package, which a consumer can always rebuild from the audit log.
+`AccountableState::subscribe(cursor, limit)` reads the node's durable feed (`<storage>.feed`). Every event is signed by the node, numbered and synced before anyone can read it; ids survive restarts, so a consumer resumes from the last id it saw and never loses an event. Events are notifications; the authoritative record is the package.
 
 ## Publishing to any system
 
@@ -60,13 +56,3 @@ Take `package.encode()` and `package.commitment().encode()` and put them whereve
 ## What this is not
 
 It is not a verdict service, not a majority decision and not on-chain verification. The 32-byte id binds bytes; it does not make them true. Retention, availability and any penalty policy belong to the game.
-
-## Independent verification example
-The headless run writes each observed violation as `<artifact>.violation-N-<kind>.bin.package`
-(a `GV-EVIDENCE-PACKAGE/V1`) and records the match id in `$DATA/match_id`:
-
-```
-cargo run -p gv-edge --example verify_package -- PACKAGE MATCH_ID_HEX alice.pub bob.pub
-PROVEN IllegalInput by player 50ad84e9ef76f8d6…  package 5cc8bb5b…   (exit 0)
-```
-A tampered or wrong-context package prints `NOT VERIFIED: <reason>` and exits 1.

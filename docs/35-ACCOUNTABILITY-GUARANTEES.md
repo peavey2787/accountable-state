@@ -78,8 +78,8 @@ Also tested: crash/restart recovery (`record_file_recovers_from_torn_and_corrupt
 anti-entropy (`evidence_propagates_to_every_peer_by_anti_entropy`), witness equivocation
 (`witness_equivocation_is_proven_against_the_witness_only`), lossy/partitioned networks
 (`a_lossy_reordering_network_never_produces_a_cheating_verdict`,
-`partition_then_heal_ends_cleared_not_accused`) and real native two-process matches
-(`scripts/smoke-arena-linux.sh`, `scripts/headless-arena-linux.sh`).
+`partition_then_heal_ends_cleared_not_accused`) the facade (`crates/accountable-state/tests/node.rs`) and real native two-process matches
+in [anti-cheat](https://github.com/peavey2787/anti-cheat).
 
 ## Limits
 

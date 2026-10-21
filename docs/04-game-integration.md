@@ -25,16 +25,19 @@ No field may be changed mid-match unless a versioned, quorum-authorized reconfig
 
 ## Required B: deterministic canonical transition
 
-Recommended Rust-facing shape:
+The SDK trait (`accountable_state::StateMachine`):
 
 ```rust
-pub trait GameRules {
-    fn ruleset_hash(&self) -> [u8; 32];
-    fn apply(&self, old: &[u8], input: &[u8]) -> Result<Vec<u8>, String>;
+pub trait StateMachine {
+    fn ruleset_hash(&self) -> Digest;
+    fn genesis(&self, roster: &[PlayerId; 2]) -> Vec<u8>;
+    fn apply(&self, state: &[u8], input: &[u8]) -> Result<Vec<u8>, RuleError>;
+    fn ordering(&self, action: u16) -> ActionOrdering { ActionOrdering::MergeSafe }
 }
+pub enum RuleError { InvalidAction(ViolationCode), ExecutionFailure(String) }
 ```
 
-This is the current *minimal* SDK trait. Mature API should add `validate_input`, `advance_tick`, `validate_cross_player_interaction`, `reason_code`, and bounded execution instrumentation. The transition MUST use canonical serialization and agreed input ordering. It must reject invalid inputs and perform checked integer arithmetic; for deterministic movement use signed fixed-point coordinates (e.g., millimeters in i64) and fixed tick duration. No `Date.now()`, OS RNG, nondeterministic hash map iteration, unseeded random scheduling, or renderer-dependent physics may influence canonical outcomes.
+Only `RuleError::InvalidAction` is fraud evidence: it names a rule the signed action broke, by a stable application-defined `ViolationCode`. `ExecutionFailure` (a bug, an exhausted budget) never accuses anyone. `ordering` marks actions whose outcome depends on a global order (a conflicting financial transfer, a contested item); the node refuses them, because a bilateral protocol can never declare them final. The transition MUST use canonical serialization and agreed input ordering. It must reject invalid inputs and perform checked integer arithmetic; for deterministic movement use signed fixed-point coordinates (e.g., millimeters in i64) and fixed tick duration. No `Date.now()`, OS RNG, nondeterministic hash map iteration, unseeded random scheduling, or renderer-dependent physics may influence canonical outcomes.
 
 Example movement invariants: displacement/velocity, acceleration, jump arc, grounded state, stamina, obstruction, teleports authorized by spells, boosts and mounts, map bounds, friction, collision order, root motion/animation effects, and max tick budget. Merely checking global speed incorrectly flags legitimate jumps, knockbacks and speed buffs; titles must express their real rules.
 
@@ -76,7 +79,7 @@ A commitment is not a visibility policy. A server/peer that transmits hidden ene
 
 ## Minimal toy example
 
-`examples/movement/src/main.rs` implements a signed single-coordinate toy transition, with domain-separated state commitments and an inclusion path. It is a local demonstration, not multiplayer acceptance or physical anti-cheat. `crates/sdk` exposes an early `GameAdapter` trait with `initial_state`, `view_for`, and `validate_manifest`; additional methods above are planned.
+`examples/movement/src/main.rs` implements a signed single-coordinate toy transition, with domain-separated state commitments and an inclusion path. It is a local demonstration, not multiplayer acceptance or physical anti-cheat. The optional `accountable_state::view::ViewPolicy` trait projects certified state per observer and role (Required C); manifest validation remains the application's.
 
 ## r3 signed event batching / independent 1v1 evidence
 

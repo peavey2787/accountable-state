@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use super::*;
-use crate::arena::{self, ArenaRules};
-use crate::{apply_tick, PublicRules};
+use crate::testkit::{self as grid, GridRules};
+use crate::{apply_tick, StateMachine};
 use gv_core::PlayerId;
 use gv_sig::SigningKey;
 
@@ -32,15 +32,15 @@ fn script(seed: u64, ticks: usize) -> Vec<u16> {
     let mut rng = Rng(seed | 1);
     let pool = [
         0,
-        arena::LEFT,
-        arena::RIGHT,
-        arena::UP,
-        arena::DOWN,
-        arena::ATTACK,
-        arena::GUARD,
-        arena::UP | arena::ATTACK,
-        arena::LEFT | arena::RIGHT, // contradictory: illegal
-        128,                        // unsupported: illegal
+        grid::LEFT,
+        grid::RIGHT,
+        grid::UP,
+        grid::DOWN,
+        grid::ACT,
+        grid::HOLD,
+        grid::UP | grid::ACT,
+        grid::LEFT | grid::RIGHT, // contradictory: illegal
+        128,                      // unsupported: illegal
     ];
     let mut out = Vec::with_capacity(ticks);
     while out.len() < ticks {
@@ -55,7 +55,7 @@ fn script(seed: u64, ticks: usize) -> Vec<u16> {
 
 /// Independent reference: replay full histories with the same rules.
 fn reference(
-    rules: &ArenaRules,
+    rules: &GridRules,
     roster: &[PlayerId; 2],
     inputs: &[Vec<u16>; 2],
     ticks: usize,
@@ -71,9 +71,9 @@ fn reference(
     state
 }
 
-fn make(local: usize, max_predict: u64) -> Timeline<ArenaRules> {
+fn make(local: usize, max_predict: u64) -> Timeline<GridRules> {
     let roster = roster();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let genesis = rules.genesis(&roster);
     Timeline::new(rules, roster, roster[local], 0, genesis, max_predict).unwrap()
 }
@@ -84,7 +84,7 @@ fn lossy_delayed_streams_converge_to_the_independent_replay() {
         let ticks = 700;
         let inputs = [script(seed * 7, ticks), script(seed * 13 + 5, ticks)];
         let roster = roster();
-        let rules = ArenaRules::new(roster);
+        let rules = GridRules::new(roster);
         let mut line = [make(0, 100_000), make(1, 100_000)];
         let mut sender = [StreamSender::new(0, 60, 4), StreamSender::new(0, 60, 4)];
         let mut rng = Rng(seed * 99 + 3);
@@ -135,7 +135,7 @@ fn lossy_delayed_streams_converge_to_the_independent_replay() {
         }
         let want = reference(&rules, &roster, &inputs, ticks);
         for p in 0..2 {
-            let state_at = |l: &Timeline<ArenaRules>| {
+            let state_at = |l: &Timeline<GridRules>| {
                 // Rebuild the state at `ticks` from the timeline's own history.
                 let mut s = rules.genesis(&roster);
                 for t in 0..ticks {
@@ -162,7 +162,7 @@ fn provisional_state_matches_replay_once_inputs_are_confirmed() {
     let ticks = 300;
     let inputs = [script(3, ticks), script(4, ticks)];
     let roster = roster();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let mut a = make(0, 10_000);
     for t in 0..ticks {
         a.advance(inputs[0][t]).unwrap();
@@ -202,7 +202,7 @@ fn rebase_adopts_certified_state_and_reports_divergence() {
     let ticks = 120;
     let inputs = [script(9, ticks), script(10, ticks)];
     let roster = roster();
-    let rules = ArenaRules::new(roster);
+    let rules = GridRules::new(roster);
     let mut a = make(0, 10_000);
     for t in 0..ticks {
         a.advance(inputs[0][t]).unwrap();
@@ -232,7 +232,7 @@ fn rebase_adopts_certified_state_and_reports_divergence() {
 #[test]
 fn hidden_opponent_is_predicted_neutral_not_held() {
     let mut a = make(0, 10);
-    a.set_remote(0, &[arena::RIGHT; 5]).unwrap();
+    a.set_remote(0, &[grid::RIGHT; 5]).unwrap();
     for _ in 0..5 {
         a.advance(0).unwrap();
     }
@@ -282,16 +282,16 @@ fn changes_are_sent_at_once_and_repeated_until_acknowledged() {
         s.push(0);
         let _ = s.due(t + 1, 0);
     }
-    s.push(arena::RIGHT);
+    s.push(grid::RIGHT);
     let first = s.due(11, 0);
     assert_eq!(first.len(), 1, "a change goes out immediately");
-    assert_eq!(*first[0].expand().last().unwrap(), arena::RIGHT);
+    assert_eq!(*first[0].expand().last().unwrap(), grid::RIGHT);
     // Not acknowledged: it is repeated.
     let mut repeated = 0;
     for t in 11..40u64 {
-        s.push(arena::RIGHT);
+        s.push(grid::RIGHT);
         for f in s.due(t + 1, 0) {
-            assert!(f.expand().contains(&arena::RIGHT));
+            assert!(f.expand().contains(&grid::RIGHT));
             repeated += 1;
         }
     }
@@ -299,7 +299,7 @@ fn changes_are_sent_at_once_and_repeated_until_acknowledged() {
     s.on_peer_ack(40);
     let mut after = 0;
     for t in 40..100u64 {
-        s.push(arena::RIGHT);
+        s.push(grid::RIGHT);
         if !s.due(t + 1, 0).is_empty() {
             after += 1;
         }
@@ -314,7 +314,7 @@ fn hidden_ticks_are_never_streamed() {
     let mut leaked = false;
     for t in 0..150u64 {
         s.push(if (30..90).contains(&t) {
-            arena::RIGHT
+            grid::RIGHT
         } else {
             0
         });
@@ -336,7 +336,7 @@ fn hidden_ticks_are_never_streamed() {
     // ...but traffic resumes after the window.
     let mut resumed = false;
     for t in 150..260u64 {
-        s.push(arena::LEFT);
+        s.push(grid::LEFT);
         resumed |= s.due(t + 1, 0).iter().any(|f| f.from_tick >= 90);
     }
     assert!(resumed, "streaming resumes once the window ends");

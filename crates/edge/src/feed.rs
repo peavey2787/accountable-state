@@ -250,94 +250,6 @@ pub fn read_since(path: &Path, after: u64, limit: usize) -> Vec<SignedEvent> {
         .collect()
 }
 
-/// In-process live fan-out on top of the persistent store. Publishing persists first; live
-/// subscribers get a bounded, non-blocking `try_send`, and recover any gap from the store.
-pub struct SignedFeed {
-    store: FeedStore,
-    subs: Vec<(
-        std::sync::mpsc::SyncSender<SignedEvent>,
-        std::sync::Arc<std::sync::atomic::AtomicU64>,
-    )>,
-}
-
-pub struct FeedSubscription {
-    pub events: std::sync::mpsc::Receiver<SignedEvent>,
-    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    last_seen: u64,
-}
-
-pub const MAX_FEED_SUBSCRIBERS: usize = 16;
-
-impl SignedFeed {
-    pub fn new(store: FeedStore) -> Self {
-        Self {
-            store,
-            subs: Vec::new(),
-        }
-    }
-    pub fn store(&self) -> &FeedStore {
-        &self.store
-    }
-    /// `capacity` is clamped to 1..=4096. `None` past [`MAX_FEED_SUBSCRIBERS`].
-    pub fn subscribe(&mut self, capacity: usize) -> Option<FeedSubscription> {
-        if self.subs.len() >= MAX_FEED_SUBSCRIBERS {
-            return None;
-        }
-        let (tx, rx) = std::sync::mpsc::sync_channel(capacity.clamp(1, 4096));
-        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        self.subs.push((tx, dropped.clone()));
-        Some(FeedSubscription {
-            events: rx,
-            dropped,
-            last_seen: self.store.last_id(),
-        })
-    }
-    /// Persist, then offer to subscribers. A persistence error is returned and nothing is
-    /// published (an event a subscriber saw is always recoverable).
-    pub fn publish(&mut self, event: ExportEvent) -> io::Result<u64> {
-        let e = self.store.append(event)?;
-        let id = e.id;
-        self.subs
-            .retain(|(tx, dropped)| match tx.try_send(e.clone()) {
-                Ok(()) => true,
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    true
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
-            });
-        Ok(id)
-    }
-}
-
-impl FeedSubscription {
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    pub fn last_seen(&self) -> u64 {
-        self.last_seen
-    }
-    /// Everything new, in order and gap-free: if the live channel overflowed (ids skip) the
-    /// missed events are re-read from the persistent store by id.
-    pub fn drain(&mut self, feed: &SignedFeed) -> Vec<SignedEvent> {
-        let live: Vec<SignedEvent> = self.events.try_iter().collect();
-        let contiguous = live
-            .iter()
-            .enumerate()
-            .all(|(i, e)| e.id == self.last_seen + 1 + i as u64)
-            && live.last().map_or(self.last_seen, |e| e.id) == feed.store().last_id();
-        let out = if contiguous {
-            live
-        } else {
-            feed.store().since(self.last_seen, usize::MAX)
-        };
-        if let Some(l) = out.last() {
-            self.last_seen = l.id;
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,32 +308,29 @@ mod tests {
     }
 
     #[test]
-    fn ids_persist_across_restart_and_a_slow_subscriber_recovers_every_event() {
+    fn ids_persist_across_restart_and_a_late_reader_resumes_from_its_cursor() {
         let d = dir("recover");
         let path = d.join("feed");
-        let mut feed = SignedFeed::new(FeedStore::open(&path, key(), M).unwrap());
-        let mut slow = feed.subscribe(2).unwrap();
+        let mut feed = FeedStore::open(&path, key(), M).unwrap();
         for i in 0..50 {
-            feed.publish(if i % 10 == 0 { evidence() } else { cp(i) })
+            feed.append(if i % 10 == 0 { evidence() } else { cp(i) })
                 .unwrap();
         }
-        assert!(slow.dropped() > 0, "the live channel overflowed");
-        let got = slow.drain(&feed);
-        assert_eq!(
-            got.len(),
-            50,
-            "overflow recovered from the persistent store"
-        );
+        let got = feed.since(0, usize::MAX);
+        assert_eq!(got.len(), 50);
         assert!(got
             .iter()
             .enumerate()
             .all(|(i, e)| e.id == i as u64 + 1 && e.verify().is_ok()));
-        assert_eq!(slow.last_seen(), 50);
+        assert_eq!(
+            feed.since(45, 2).iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![46, 47]
+        );
         drop(feed);
         // Restart: ids continue, nothing is renumbered, an external process can read them.
-        let mut feed = SignedFeed::new(FeedStore::open(&path, key(), M).unwrap());
-        assert_eq!(feed.store().last_id(), 50);
-        assert_eq!(feed.publish(evidence()).unwrap(), 51);
+        let mut feed = FeedStore::open(&path, key(), M).unwrap();
+        assert_eq!(feed.last_id(), 50);
+        assert_eq!(feed.append(evidence()).unwrap().id, 51);
         let external = read_since(&path, 48, 100);
         assert_eq!(
             external.iter().map(|e| e.id).collect::<Vec<_>>(),

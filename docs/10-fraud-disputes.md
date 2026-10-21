@@ -64,7 +64,7 @@ An invalid transition may require a complete world snapshot (including map colli
 
 ## Prototype implementation
 
-`gv_edge::fraud_bundle` (`GV-FRAUD-BUNDLE/V1`) verifies a self-contained single-step fraud package against a trusted match invitation: authenticated certified history, a signed input, both state openings and a separately player-signed state-output claim, plus a game `GameRules::apply` result. It returns a proven-invalid-transition result for a mismatch. The caller MUST separately trust the match invitation and ruleset. The signed state claim is verified against the player identity, so an attributable false output is distinguishable from a false checkpoint by someone else. The result must not directly trigger financial punishment or bans without a game-defined policy.
+`gv_edge::fraud_bundle` (`GV-FRAUD-BUNDLE/V1`) verifies a self-contained single-step fraud package against a trusted match invitation: authenticated certified history, a signed input, both state openings and a separately player-signed state-output claim, plus a `StateMachine::apply` result. It returns a proven-invalid-transition result for a mismatch. The caller MUST separately trust the match invitation and ruleset. The signed state claim is verified against the player identity, so an attributable false output is distinguishable from a false checkpoint by someone else. The result must not directly trigger financial punishment or bans without a game-defined policy.
 
 ## Explicit protection against malicious accusations
 
