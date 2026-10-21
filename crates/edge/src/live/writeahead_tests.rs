@@ -77,6 +77,7 @@ impl Duo {
         store.set_compact_at(40_000);
         assert!(loaded.heads.is_empty());
         pipes[0].auditor_mut().attach_store(Box::new(store), 0, 0);
+        pipes[1].auditor_mut().use_ephemeral_store_for_tests();
         Self {
             pipes,
             wire: [VecDeque::new(), VecDeque::new()],
@@ -428,3 +429,18 @@ fn control_sending_before_persisting_is_detected_as_self_equivocation() {
 /// Hand-over: a store implementation is just a trait object, so a host can supply its own.
 #[allow(dead_code)]
 fn _assert_object_safe(_: &dyn TrustStore) {}
+
+#[test]
+fn without_a_durable_store_nothing_signed_is_released() {
+    let (me, other) = (keys()[0].clone(), keys()[1].clone());
+    let mut au = Auditor::new(me.clone(), [me.id(), other.id()], M, R).unwrap();
+    au.test_append(1, vec![1]);
+    assert!(!au.make_durable(), "a missing store must fail closed");
+    assert!(au.persistence_failed());
+    assert!(matches!(
+        au.poll_event(),
+        Some(AuditEvent::PersistenceFailed(_))
+    ));
+    assert!(!au.make_durable());
+    assert!(au.poll_event().is_none(), "the failure is reported once");
+}

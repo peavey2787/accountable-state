@@ -158,3 +158,65 @@ fn rebase_is_durable_and_survives_another_restart() {
     assert_eq!(log.head(), real.head());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_witness_head_defeats_an_opponent_withholding_a_newer_head() {
+    let (a, b) = keys();
+    let w = SigningKey::from_seed([4; 32]);
+    let real = log_of(&a, 30, 0);
+    let held_by_witness = real.sign_authenticator(R, &a);
+    let mut x = au(&a, &b);
+    x.admit_witness(w.id());
+    x.restore(Some(log_of(&a, 5, 0)), &[], &[]);
+    x.require_anchor_check();
+    feed(&mut x, PipeMsg::Anchor(None)); // the opponent claims it holds nothing
+    assert!(
+        x.anchor_check_pending(),
+        "with witnesses pinned, the opponent alone cannot end the check"
+    );
+    assert!(!x.recovery().may_sign());
+    x.on_witness_anchor(&held_by_witness);
+    assert!(!x.anchor_check_pending());
+    assert!(x.recovery().may_sign());
+    assert_eq!(
+        x.log().head(),
+        real.head(),
+        "rebased on the witness-held head"
+    );
+}
+
+#[test]
+fn silent_witnesses_delay_signing_only_for_the_bounded_wait() {
+    let (a, b) = keys();
+    let mut x = au(&a, &b);
+    x.admit_witness(SigningKey::from_seed([4; 32]).id());
+    x.restore(Some(log_of(&a, 5, 0)), &[], &[]);
+    x.require_anchor_check();
+    feed(&mut x, PipeMsg::Anchor(None));
+    x.tick(super::auditor::ANCHOR_WITNESS_WAIT - 1);
+    assert!(x.anchor_check_pending());
+    x.tick(super::auditor::ANCHOR_WITNESS_WAIT);
+    assert!(!x.anchor_check_pending());
+    assert!(x.recovery().may_sign());
+}
+
+#[test]
+fn a_witness_alone_never_ends_the_check_and_unpinned_witnesses_are_ignored() {
+    let (a, b) = keys();
+    let real = log_of(&a, 30, 0);
+    let head = real.sign_authenticator(R, &a);
+    let mut x = au(&a, &b);
+    x.restore(None, &[], &[]);
+    x.require_anchor_check();
+    x.on_witness_anchor(&head); // no witness pinned: ignored
+    assert_eq!(x.log().len(), 0);
+    x.admit_witness(SigningKey::from_seed([4; 32]).id());
+    x.on_witness_anchor(&head);
+    assert!(
+        x.anchor_check_pending(),
+        "the opponent's answer is mandatory"
+    );
+    feed(&mut x, PipeMsg::Anchor(None));
+    assert!(!x.anchor_check_pending());
+    assert_eq!(x.log().head(), real.head());
+}

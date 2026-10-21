@@ -48,3 +48,14 @@ Truncation at **every** length and bit rot, interrupted writes (the old state su
 ## Honest gap
 
 The formal model ([41](41-FORMAL-MODEL.md)) shows `NoSelfEquivocation` holds only if recovery does the pin check **and** the pin is durable *before* the statement is released (`PinsWriteAhead`). The implementation enforces both: `Pipeline::poll_outbox` and `Auditor::poll_witness_response` release nothing until `Auditor::make_durable` has committed the log and every own signed head to the write-ahead `TrustStore`, a failing store withholds all signed output (fail closed), and the auditor's raw outbox is crate-private so a host cannot bypass the barrier. `live/writeahead_tests.rs` kills the participant at every persistence-to-send boundary and checks that a restart never contradicts a head it already sent. A pipeline with no store attached has no durability and therefore no `NoSelfEquivocation` across crashes; hosts must attach one (`examples/edge-p2p` does, and fails closed when it cannot).
+
+## Trust boundary
+
+Anchored recovery does not give unconditional rollback protection. A restarted participant can only learn which heads it signed from parties that hold them, and any of them can withhold a newer head. The auditor enforces this boundary (`Auditor::require_anchor_check`):
+
+* The opponent's answer (`PipeMsg::Anchor`, either its highest head of mine or "none") is mandatory. A witness head alone never ends the check.
+* Witness-held heads arrive through a separate, source-tagged path (`Auditor::on_witness_anchor`) from the local witness service, never from the opponent's wire, and only while at least one witness is pinned.
+* With witnesses pinned, signing waits after the opponent's answer until a witness returned a head or `ANCHOR_WITNESS_WAIT` ticks passed, so a head the opponent withholds is still recovered when any honest witness holds it.
+* "No prior heads" resolves `Unresolved(NoAnchor)` only when no source returned a head of mine.
+
+Residual risk: if every responding source withholds or lacks the newest head, the participant resumes from an older head and its next head equivocates. The evidence is genuine (both heads carry its signature), so the protection is only as strong as the assumption that at least one responder is honest and current. Deployments that need rollback protection against a malicious opponent must pin witnesses. See [42](42-REMAINING-GAPS.md), gap 1a.

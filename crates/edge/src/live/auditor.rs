@@ -123,16 +123,47 @@ pub struct Auditor {
     /// Pinned third-party witnesses allowed to challenge me (never gameplay authorities).
     witnesses: BTreeSet<PlayerId>,
     witness_responses: VecDeque<Response>,
-    /// Write-ahead barrier (optional only so unit tests can run in memory).
-    store: Option<Box<dyn TrustStore>>,
+    /// Write-ahead barrier. Nothing signed leaves until a store is attached.
+    store: Durability,
     store_failed: bool,
     committed_len: u64,
     committed_head: u64,
     now: u64,
     commit_retry_at: u64,
     commits: u64,
-    /// Signing stays suspended until the opponent (or a witness) answered an anchor request.
+    /// Signing stays suspended until the anchor check is complete (see [`AnchorCheck`]).
     anchor_pending: bool,
+    anchor: AnchorCheck,
+}
+
+/// Who has answered the anchor check after a (re)start. The opponent's answer is mandatory: it
+/// receives every head I sign. When witnesses are pinned, signing additionally waits for one of
+/// them to hand back a head of mine or for [`ANCHOR_WITNESS_WAIT`] ticks to pass, so a newer head
+/// withheld by the opponent is still recovered if any honest witness holds it.
+#[derive(Default)]
+struct AnchorCheck {
+    opponent: Option<AnchorAnswer>,
+    witness_answered: bool,
+    wait_until: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnchorAnswer {
+    Head,
+    NoHeads,
+}
+
+/// Ticks to wait for a witness-held head after the opponent answered an anchor check.
+pub const ANCHOR_WITNESS_WAIT: u64 = 600;
+
+/// Where signed state is made durable before it may leave the process.
+enum Durability {
+    /// No store attached yet: the barrier stays closed (fail closed, never a silent fallback).
+    Missing,
+    Journal(Box<dyn TrustStore>),
+    /// Explicit in-memory mode for tests; offers no crash or rollback protection.
+    #[cfg(any(test, feature = "ephemeral-store"))]
+    EphemeralForTests,
 }
 
 /// Outcome of [`Auditor::restore`].
@@ -188,7 +219,7 @@ impl Auditor {
             gate_pins: BTreeMap::new(),
             witnesses: BTreeSet::new(),
             witness_responses: VecDeque::new(),
-            store: None,
+            store: Durability::Missing,
             store_failed: false,
             committed_len: 0,
             committed_head: 0,
@@ -196,6 +227,7 @@ impl Auditor {
             commit_retry_at: 0,
             commits: 0,
             anchor_pending: false,
+            anchor: AnchorCheck::default(),
         })
     }
 
@@ -302,26 +334,62 @@ impl Auditor {
         true
     }
     /// Ask the opponent for the highest head of mine it holds and suspend signing until an
-    /// answer (from it, or a witness) arrives. Call after every (re)start of a participant:
+    /// anchor check completes ([`AnchorCheck`]). Call after every (re)start of a participant:
     /// state loss is only detectable against heads held elsewhere.
     pub fn require_anchor_check(&mut self) {
         self.anchor_pending = true;
+        self.anchor = AnchorCheck::default();
         self.outbox.push_back(PipeMsg::AnchorReq);
     }
     pub fn anchor_check_pending(&self) -> bool {
         self.anchor_pending
     }
+    /// The opponent's answer to my anchor request (wire: `PipeMsg::Anchor`).
     fn on_anchor(&mut self, a: Option<Authenticator>) {
-        match a {
-            Some(a) => {
-                if a.owner != self.me || a.match_id != self.match_id || a.verify().is_err() {
-                    return; // not mine / not valid: ignore, keep waiting
-                }
+        let answer = match a {
+            Some(a) if self.is_own_head(&a) => {
                 self.supply_anchor(&a);
+                AnchorAnswer::Head
             }
-            None => {
-                self.confirm_no_prior_heads();
-            }
+            Some(_) => return, // not mine / not valid: ignore, keep waiting
+            None => AnchorAnswer::NoHeads,
+        };
+        if !self.anchor_pending || self.anchor.opponent.is_some() {
+            return;
+        }
+        self.anchor.opponent = Some(answer);
+        self.anchor.wait_until = self.now + ANCHOR_WITNESS_WAIT;
+        self.finish_anchor_check();
+    }
+    /// A head of mine held by a pinned witness (local, from the witness service; never from the
+    /// opponent's wire). It is applied even outside an anchor check: a newer head proves state loss.
+    pub fn on_witness_anchor(&mut self, a: &Authenticator) {
+        if self.witnesses.is_empty() || !self.is_own_head(a) {
+            return;
+        }
+        self.supply_anchor(a);
+        self.anchor.witness_answered = true;
+        self.finish_anchor_check();
+    }
+    fn is_own_head(&self, a: &Authenticator) -> bool {
+        a.owner == self.me && a.match_id == self.match_id && a.verify().is_ok()
+    }
+    /// Resume signing once the trust boundary is met: the opponent answered, and (with witnesses
+    /// pinned) a witness answered or the wait elapsed. "No heads" is only believed when no
+    /// source handed back any head of mine. Residual risk, documented in doc 42: if every
+    /// responding source withholds a newer head, a later head of mine can still contradict it.
+    fn finish_anchor_check(&mut self) {
+        let Some(opponent) = self.anchor.opponent else {
+            return;
+        };
+        let witness_done = self.witnesses.is_empty()
+            || self.anchor.witness_answered
+            || self.now >= self.anchor.wait_until;
+        if !self.anchor_pending || !witness_done {
+            return;
+        }
+        if opponent == AnchorAnswer::NoHeads {
+            self.confirm_no_prior_heads();
         }
         self.rebase_on_anchor();
         self.anchor_pending = false;
@@ -344,7 +412,7 @@ impl Auditor {
             return false;
         };
         let rebased = AuditLog::rebased(self.match_id, self.me, best.seq, best.head);
-        if let Some(store) = self.store.as_mut() {
+        if let Durability::Journal(store) = &mut self.store {
             let heads: Vec<Authenticator> = self.pins.for_owner(self.me).cloned().collect();
             if let Err(e) = store.reset(&rebased, &heads) {
                 self.store_failed = true;
@@ -398,16 +466,34 @@ impl Auditor {
         durable_len: u64,
         durable_head: u64,
     ) {
-        self.store = Some(store);
+        self.store = Durability::Journal(store);
         self.committed_len = durable_len;
         self.committed_head = durable_head;
+    }
+    /// Run without durable storage. Signed heads are lost on a crash, so a restarted participant
+    /// can equivocate unknowingly: only for tests and simulations, never accountable operation.
+    #[cfg(any(test, feature = "ephemeral-store"))]
+    pub fn use_ephemeral_store_for_tests(&mut self) {
+        self.store = Durability::EphemeralForTests;
+        self.store_failed = false;
     }
     /// The durability barrier. Returns `true` when everything signed so far (log through its
     /// head, own pinned heads) is durable, so queued messages may leave the process. On a store
     /// error it returns `false` (fail closed), reports once and retries after a short delay.
     pub fn make_durable(&mut self) -> bool {
-        let Some(store) = self.store.as_mut() else {
-            return true;
+        let store = match &mut self.store {
+            Durability::Journal(store) => store,
+            #[cfg(any(test, feature = "ephemeral-store"))]
+            Durability::EphemeralForTests => return true,
+            Durability::Missing => {
+                if !self.store_failed {
+                    self.store_failed = true;
+                    self.events.push_back(AuditEvent::PersistenceFailed(
+                        "no durable trust store attached".into(),
+                    ));
+                }
+                return false;
+            }
         };
         let own_head = self.pins.highest(self.me).map_or(0, |a| a.seq);
         if !self.store_failed
@@ -626,7 +712,8 @@ impl Auditor {
         if self.anchor_pending {
             return; // restart: do not sign before the anchor check answered
         }
-        if self.store_failed && !self.make_durable() {
+        if (self.store_failed || matches!(self.store, Durability::Missing)) && !self.make_durable()
+        {
             return; // fail closed: no new signed head while the write-ahead store is failing
         }
         if !self.recovery.may_sign() {
@@ -659,9 +746,10 @@ impl Auditor {
     /// Advance logical time: retransmit, suspect, release pins.
     pub fn tick(&mut self, now: u64) {
         self.now = self.now.max(now);
-        if self.anchor_pending && now % 120 == 0 {
+        if self.anchor_pending && self.anchor.opponent.is_none() && now % 120 == 0 {
             self.outbox.push_back(PipeMsg::AnchorReq); // peer may not have been connected yet
         }
+        self.finish_anchor_check();
         let expired: Vec<Digest> = self
             .gate_pins
             .iter()

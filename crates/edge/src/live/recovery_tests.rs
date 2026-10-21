@@ -28,7 +28,9 @@ fn log_of(key: &SigningKey, n: u64, salt: u8) -> AuditLog {
     l
 }
 fn auditor(me: &SigningKey, other: &SigningKey) -> Auditor {
-    Auditor::new(me.clone(), [me.id(), other.id()], M, R).unwrap()
+    let mut a = Auditor::new(me.clone(), [me.id(), other.id()], M, R).unwrap();
+    a.use_ephemeral_store_for_tests();
+    a
 }
 fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("gv-recovery-{name}-{}", std::process::id()));

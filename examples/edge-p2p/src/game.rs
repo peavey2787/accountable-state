@@ -13,7 +13,7 @@ use crate::bounded::Outbox;
 use crate::ui::{ArenaUi, HideView};
 use crate::witness_net::{spawn_player_hub, HubIn, LinkSpec};
 use gv_core::{MatchId, PlayerId};
-use gv_edge::audit::journal::{FileTrustStore, TrustStore};
+use gv_edge::audit::journal::FileTrustStore;
 use gv_edge::audit::store::RecordFile;
 use gv_edge::export::ExportEvent;
 use gv_edge::feed::{FeedStore, SignedFeed};
@@ -70,19 +70,6 @@ pub struct GameConfig {
     /// Pinned third-party witnesses (optional; a 1v1 match needs none).
     pub witness_links: Vec<LinkSpec>,
     pub witness_keys: Vec<PlayerId>,
-}
-
-/// A store that always fails: used when the journal cannot be opened, so nothing signed can ever
-/// leave the process (fail closed).
-struct NoStore;
-impl TrustStore for NoStore {
-    fn commit(
-        &mut self,
-        _: &gv_edge::audit::AuditLog,
-        _: &[gv_edge::audit::Authenticator],
-    ) -> std::io::Result<()> {
-        Err(std::io::Error::other("write-ahead journal unavailable"))
-    }
 }
 
 /// Build a `GV-EVIDENCE-PACKAGE/V1` fraud witness for an observed violation, if the evidence is
@@ -172,6 +159,8 @@ fn bot_controls(index: usize, tick: u64) -> u16 {
 enum PipeIn {
     Control(u16),
     Net(Box<PipeMsg>),
+    /// A head of mine held by a pinned witness (source-tagged: never from the opponent's wire).
+    WitnessAnchor(Box<gv_edge::audit::Authenticator>),
     Hide,
     Cheat,
     Equivocate,
@@ -309,8 +298,7 @@ async fn pipeline_task(
                         "cannot open write-ahead trust journal: {e}; signing is disabled"
                     )));
                     persist_ok = false;
-                    // Fail closed: without the journal nothing signed could be made durable.
-                    pipe.auditor_mut().attach_store(Box::new(NoStore), 0, 0);
+                    // Fail closed: with no store attached nothing signed can leave the process.
                 }
             }
             if let Some(cs) = durable.load_challenges().ok() {
@@ -400,6 +388,7 @@ async fn pipeline_task(
                 }
                 pipe.on_message(*msg, now, &own);
             }
+            PipeIn::WitnessAnchor(a) => pipe.auditor_mut().on_witness_anchor(&a),
             PipeIn::Hide => {
                 if let Err(e) = pipe.request_hide(now) {
                     out.send(PipeEvent::Fault(format!("hide refused: {e:?}")));
@@ -1203,7 +1192,11 @@ pub async fn play(cfg: GameConfig, link: LiveLink, ui: Option<ArenaUi>) -> Resul
         let ptx = pipe_raw.clone();
         tokio::spawn(async move {
             while let Some(m) = wrx.recv().await {
-                if ptx.send(PipeIn::Net(Box::new(m))).await.is_err() {
+                let item = match m {
+                    PipeMsg::Anchor(Some(a)) => PipeIn::WitnessAnchor(Box::new(a)),
+                    other => PipeIn::Net(Box::new(other)),
+                };
+                if ptx.send(item).await.is_err() {
                     break;
                 }
             }

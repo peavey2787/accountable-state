@@ -42,15 +42,19 @@ fn net(scripts: [Vec<u16>; 2], cfg: PipelineConfig, delay: u64) -> Net {
     let roster = roster();
     let rules = ArenaRules::new(roster);
     let mk = |i: usize, script: Vec<u16>| Peer {
-        pipe: Pipeline::new(
-            keys()[i].clone(),
-            roster,
-            MATCH,
-            rules.clone(),
-            MatchReplica::new(MATCH, roster, rules.clone()).unwrap(),
-            cfg.clone(),
-        )
-        .unwrap(),
+        pipe: {
+            let mut pipe = Pipeline::new(
+                keys()[i].clone(),
+                roster,
+                MATCH,
+                rules.clone(),
+                MatchReplica::new(MATCH, roster, rules.clone()).unwrap(),
+                cfg.clone(),
+            )
+            .unwrap();
+            pipe.auditor_mut().use_ephemeral_store_for_tests();
+            pipe
+        },
         script,
         events: Vec::new(),
         sent: Vec::new(),
@@ -803,6 +807,7 @@ fn auditor_restart_restores_log_and_reverifies_persisted_evidence() {
     );
     let (m, r) = ([7u8; 32], [9u8; 32]);
     let mut auditor = super::Auditor::new(a.clone(), [a.id(), b.id()], m, r).unwrap();
+    auditor.use_ephemeral_store_for_tests();
     let mut log = AuditLog::new(m, a.id());
     for i in 0..10u64 {
         log.append(1, i.to_le_bytes().to_vec()).unwrap();

@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# In-memory trust store for tests and simulations only (no crash/rollback protection).
+ephemeral-store = []
+
 [dependencies]
 gv-core = { path = "../core" }
 gv-codec = { path = "../codec" }
