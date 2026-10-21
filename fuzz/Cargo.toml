@@ -1,0 +1,39 @@
+[package]
+name = "gv-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gv-codec = { path = "../crates/codec" }
+gv-edge = { path = "../crates/edge" }
+
+[workspace]
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "live_wire"
+path = "fuzz_targets/live_wire.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "evidence"
+path = "fuzz_targets/evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "archive"
+path = "fuzz_targets/archive.rs"
+test = false
+doc = false

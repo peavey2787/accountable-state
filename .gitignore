@@ -1,0 +1,31 @@
+/target
+**/.DS_Store
+*.log
+*.swp
+.env
+
+# Local P2P demo identities / private keys, never commit these
+*identity/
+*-identity/
+*.secret
+*.key
+*-card.bin
+*-evidence.bin
+*-history.bin
+
+# Local-only P2P/Hydra identity data, credentials and demo receipts
+.gv-demo-*
+**/*.pending
+**/hydra-identity/
+*.receipt.bin
+*.fraud.bin
+
+# Local arena demonstration credentials and receipts
+.arena-local/
+
+# Downloaded model-checking tools and TLC state (scripts/model-check.sh)
+.tla-tools/
+
+# cargo-fuzz build output and crash artifacts
+/fuzz/target
+/fuzz/artifacts

@@ -1,0 +1,25 @@
+{
+  "profile": "auto",
+  "network_id": 9101,
+  "identity_key_path": ".gv-demo-alice-peer-id.key",
+  "webrtc_certificate_path": ".gv-demo-alice-webrtc.pem",
+  "listen_addresses": [
+    "/ip4/127.0.0.1/udp/4101/quic-v1"
+  ],
+  "discovery": {
+    "peer_cache_path": ".gv-demo-alice-peers.json",
+    "namespace": {
+      "app_id": "gv-edge-demo-local"
+    },
+    "public_bootstrap": {
+      "mode": "disabled",
+      "bootstrap_seed_peers": [],
+      "rendezvous_peers": [],
+      "relay_peers": [],
+      "auto_connect_discovered_peers": false
+    }
+  },
+  "public_ip_probe": {
+    "enabled": false
+  }
+}

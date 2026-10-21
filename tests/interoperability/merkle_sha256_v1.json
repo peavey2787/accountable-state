@@ -1,0 +1,26 @@
+{
+  "profile": "gv-sha256-merkle-v1",
+  "hash_output": "lowercase hex, raw 32-byte SHA-256 digest",
+  "empty_root": "831efe140102374e40a1ce1508bfb1aa65902ab372e07a02aea9b291ae20a8d8",
+  "single_alpha_root": "7e7f8a70275b5f40412d5378bc0a64c8d0769a979faa68c13704b68142138b79",
+  "three_records_hex": [
+    "616c706861",
+    "62657461",
+    "67616d6d61"
+  ],
+  "three_leaves": [
+    "121c9386cedc8fde6c36f74adb14c5755e1e20136da16d6a9ac8422018426db7",
+    "4cd26b28d3a46037d1890bcf7a1f0c6eed47822a80c7fc422b72b0b41538cdc5",
+    "02c3dcd7a85fa42402395d5c56854486a18ac34ecb9d40f1382f4a20a7e7df5c"
+  ],
+  "three_root": "ca37a132e1265141964ebbfcac270145053d8d751f4a0f855f0a2ab047f79a11",
+  "proof_index_2": {
+    "index": 2,
+    "leaf_count": 3,
+    "siblings": [
+      "02c3dcd7a85fa42402395d5c56854486a18ac34ecb9d40f1382f4a20a7e7df5c",
+      "3fb4696e2d5de508ba1bc1c3859c90ac21ffbc48c555e8512e11dda6236c6400"
+    ]
+  },
+  "test_vectors_generated_with": "independent Python hashlib reference matching docs/05 specification"
+}

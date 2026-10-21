@@ -1,0 +1,31 @@
+[package]
+name = "gv-p2p"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-sig = { path = "../../crates/sig" }
+gv-codec = { path = "../../crates/codec" }
+gv-core = { path = "../../crates/core" }
+
+[features]
+default = []
+# Real transport and ratcheted encryption are opt-in: both upstream projects
+# track HEAD of their default Git branch whenever Cargo.lock is updated.
+native = ["dep:p2p-net", "dep:hydra-msg", "dep:tokio"]
+
+[dependencies.p2p-net]
+git = "https://github.com/peavey2787/p2p-net"
+optional = true
+default-features = false
+
+[dependencies.hydra-msg]
+git = "https://github.com/peavey2787/hydra-msg"
+optional = true
+
+[dependencies.tokio]
+version = "1"
+features = ["time", "sync", "rt", "macros"]
+optional = true

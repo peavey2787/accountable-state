@@ -1,0 +1,10 @@
+[package]
+name = "gv-replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-core = { path = "../../crates/core" }
+gv-commitments = { path = "../../crates/commitments" }

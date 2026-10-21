@@ -1,0 +1,17 @@
+[package]
+name = "gv-movement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-core = { path = "../../crates/core" }
+gv-commitments = { path = "../../crates/commitments" }
+gv-transcript = { path = "../../crates/transcript" }
+gv-replay = { path = "../../crates/replay" }
+gv-sig = { path = "../../crates/sig" }
+
+[[bin]]
+name = "movement-demo"
+path = "src/main.rs"

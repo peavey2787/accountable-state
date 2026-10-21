@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/sig",
+    "crates/codec",
+    "crates/edge",
+    "crates/commitments",
+    "crates/transcript",
+    "crates/replay",
+    "crates/privacy",
+    "crates/zk",
+    "crates/sdk",
+    "adapters/p2p",
+    "adapters/wasm",
+    "examples/movement",
+    "examples/edge-p2p",
+    "examples/packed-match",
+    "examples/turn-based",
+    "examples/multiplayer-combat"
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+sha2 = "0.10"
+
+# Hydra's password KDF takes ~45s per store open in an unoptimized build, which
+# starves the arena handshake/smoke-test timeouts. Optimize third-party crates
+# only; workspace crates keep fast debug builds and debug assertions.
+[profile.dev.package."*"]
+opt-level = 3

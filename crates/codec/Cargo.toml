@@ -1,0 +1,11 @@
+[package]
+name = "gv-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-core = { path = "../core" }
+gv-sig = { path = "../sig" }
+sha2 = { workspace = true }

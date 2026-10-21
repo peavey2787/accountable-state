@@ -1,0 +1,23 @@
+[package]
+name = "gv-sig"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Links Hydra's ML-DSA-65 (hydra-crypto, GPL-2.0-or-later). Binaries that link
+# this crate are therefore distributed under GPL-2.0-or-later terms.
+license = "GPL-2.0-or-later"
+
+[dependencies]
+gv-core = { path = "../core" }
+sha2 = { workspace = true }
+zeroize = "1"
+
+[dependencies.hydra-crypto]
+git = "https://github.com/peavey2787/hydra-msg"
+
+[dependencies.hydra-core]
+git = "https://github.com/peavey2787/hydra-msg"
+
+[dependencies.getrandom]
+version = "0.4"
+features = ["sys_rng"]

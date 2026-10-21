@@ -1,0 +1,10 @@
+[package]
+name = "gv-packed-match"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-codec = { path = "../../crates/codec" }
+gv-sig = { path = "../../crates/sig" }

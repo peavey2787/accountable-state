@@ -1,0 +1,16 @@
+[package]
+name = "gv-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-codec = { path = "../codec" }
+gv-core = { path = "../../crates/core" }
+gv-commitments = { path = "../../crates/commitments" }
+gv-transcript = { path = "../../crates/transcript" }
+gv-replay = { path = "../../crates/replay" }
+gv-privacy = { path = "../../crates/privacy" }
+gv-zk = { path = "../../crates/zk" }
+gv-edge = { path = "../edge" }

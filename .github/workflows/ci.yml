@@ -1,0 +1,46 @@
+name: Rust PoC validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Tool versions
+        run: |
+          rustc --version
+          cargo --version
+      - name: Build against the newest p2p-net main
+        run: cargo update -p p2p-net
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Security audit
+        run: cargo audit
+      - name: Cargo format (read-only)
+        run: cargo fmt --all -- --check
+      - name: Cargo compilation
+        run: cargo check --workspace --all-targets
+      - name: Cargo lint (no warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Rust tests
+        run: cargo test --workspace --all-targets
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Independent cryptographic/codec checks
+        run: |
+          node scripts/verify-arena-ui.mjs
+          node scripts/verify-vectors.mjs
+          node scripts/verify-event-codec.mjs
+          node scripts/bench-packing.mjs
