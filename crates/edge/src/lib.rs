@@ -11,6 +11,7 @@ pub mod feed;
 mod fraud_bundle;
 mod history;
 pub mod live;
+pub mod quorum;
 mod recovery;
 mod replica;
 #[cfg(any(test, feature = "testkit"))]
