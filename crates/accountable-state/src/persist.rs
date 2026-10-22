@@ -361,6 +361,14 @@ impl Persistence {
         cx: &Context<'_, M>,
         sink: &mut Sink<'_>,
     ) {
+        // Equivocation is packaged from its own proven-evidence event; this one carries no
+        // checkpoint evidence to package.
+        if matches!(
+            v.kind,
+            ViolationKind::Equivocation | ViolationKind::LogEquivocation
+        ) {
+            return;
+        }
         let false_checkpoint = v.kind == ViolationKind::FalseCheckpoint;
         if false_checkpoint && self.dispute_proof.is_none() {
             self.dispute_proof = CheckpointEvidence::decode(&v.evidence).ok();

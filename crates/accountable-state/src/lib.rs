@@ -1,4 +1,4 @@
-//! Accountable state: two participants run the same deterministic [`StateMachine`], every action
+//! Accountable state: a configured roster runs the same deterministic [`StateMachine`], every action
 //! is signed, replayed and co-certified, and misbehaviour leaves portable, independently
 //! verifiable evidence (`GV-EVIDENCE-PACKAGE/V1`).
 //!
@@ -17,7 +17,7 @@
 //! runner calls them. The application implements [`StateMachine`].
 //!
 //! Three streams stay separate: the lossy 60 Hz input stream ([`realtime`]), the reliable signed
-//! pipeline ([`Peer::Opponent`]) and the witness/audit channel ([`Peer::Witness`],
+//! pipeline ([`Peer::Member`]) and the witness/audit channel ([`Peer::Witness`],
 //! `GV-WITNESS/V1`, [`witness`]).
 //!
 //! Strict defaults: durable storage is mandatory ([`DurableStorage`]), authentication is

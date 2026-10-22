@@ -98,9 +98,12 @@ impl Roster {
         }
         Ok(Self { participants })
     }
-    /// A roster of players, each on a team of their own, in canonical order.
+    /// A roster of players, each on a team of their own, in canonical order. Teams follow the
+    /// canonical order, so the input order never changes the roster.
     pub fn players(ids: &[ParticipantId]) -> Result<Self, RosterError> {
-        let participants = ids
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        let participants = sorted
             .iter()
             .enumerate()
             .map(|(i, id)| Participant::player(*id, i as u16))
@@ -398,6 +401,14 @@ mod tests {
 
     fn ids(n: u8) -> Vec<ParticipantId> {
         (1..=n).map(|i| [i; 32]).collect()
+    }
+
+    #[test]
+    fn player_rosters_do_not_depend_on_input_order() {
+        let forward = Roster::players(&[[1; 32], [2; 32]]).unwrap();
+        let reverse = Roster::players(&[[2; 32], [1; 32]]).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.encode(), reverse.encode());
     }
 
     #[test]
