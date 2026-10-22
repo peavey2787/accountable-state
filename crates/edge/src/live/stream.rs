@@ -1,28 +1,31 @@
-//! Continuous, loss-tolerant input streaming between the two players.
+//! Continuous, loss-tolerant input streaming between participants.
 //!
-//! A frame carries the sender's control state for a span of ticks as a
-//! run-length list of *changes*, plus a cumulative acknowledgement of what the
-//! sender has received. Frames are idempotent and redundant: every frame
-//! repeats all changes the peer has not yet acknowledged, so a lost or
-//! reordered datagram costs nothing. Frames are unsigned hints that let the
-//! opponent predict and roll back at 60 Hz; the non-repudiable record is the
-//! signed epoch batch that the checkpoint pipeline exchanges later.
+//! A frame carries the sender's held input state for a span of ticks as a run-length list of
+//! *changes*, plus a cumulative acknowledgement of what the sender has received from the
+//! receiver. Frames are idempotent and redundant: every frame repeats all changes the peer has
+//! not yet acknowledged, so a lost or reordered datagram costs nothing. Frames are unsigned
+//! hints that let a peer predict and roll back in real time; the non-repudiable record is the
+//! signed epoch batch that the checkpoint pipeline exchanges later. The input state is an
+//! application-defined byte string of constant width (at most [`MAX_HELD_WIDTH`]).
+use gv_codec::MAX_HELD_WIDTH;
 use std::collections::VecDeque;
 
-const MAGIC: u8 = 0x53; // 'S'
-const VERSION: u8 = 1;
+const MAGIC: u8 = 0x54;
+const VERSION: u8 = 2;
+const HEADER: usize = 2 + 8 + 8 + 8 + 1 + 2;
 pub const MAX_SPAN: u64 = 4096;
 const MAX_CHANGES: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamFrame {
-    /// Controls cover ticks `from_tick..through_tick`.
+    /// Inputs cover ticks `from_tick..through_tick`.
     pub from_tick: u64,
     pub through_tick: u64,
-    pub initial: u16,
-    /// `(offset from from_tick, new control)`, strictly increasing offsets.
-    pub changes: Vec<(u32, u16)>,
-    /// Sender has authoritative remote input for every tick below this.
+    pub initial: Vec<u8>,
+    /// `(offset from from_tick, new input)`, strictly increasing offsets, each as wide as
+    /// `initial`.
+    pub changes: Vec<(u32, Vec<u8>)>,
+    /// Sender has authoritative input of the receiver for every tick below this.
     pub ack_through: u64,
 }
 
@@ -38,97 +41,109 @@ impl StreamFrame {
             .through_tick
             .checked_sub(self.from_tick)
             .ok_or(StreamError::Malformed)?;
-        if span == 0 || span > MAX_SPAN || self.changes.len() > MAX_CHANGES {
+        if span == 0
+            || span > MAX_SPAN
+            || self.changes.len() > MAX_CHANGES
+            || self.initial.len() > MAX_HELD_WIDTH
+        {
             return Err(StreamError::TooLarge);
         }
-        let mut previous = (0u32, self.initial);
+        let mut previous = (0u32, &self.initial);
         for (offset, state) in &self.changes {
-            if *offset <= previous.0 || u64::from(*offset) >= span || *state == previous.1 {
+            if *offset <= previous.0
+                || u64::from(*offset) >= span
+                || *state == *previous.1
+                || state.len() != self.initial.len()
+            {
                 return Err(StreamError::Malformed);
             }
-            previous = (*offset, *state);
+            previous = (*offset, state);
         }
         Ok(())
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + self.changes.len() * 6);
+        let width = self.initial.len();
+        let mut out =
+            Vec::with_capacity(HEADER + width * (1 + self.changes.len()) + self.changes.len() * 4);
         out.push(MAGIC);
         out.push(VERSION);
         out.extend_from_slice(&self.from_tick.to_le_bytes());
         out.extend_from_slice(&self.through_tick.to_le_bytes());
         out.extend_from_slice(&self.ack_through.to_le_bytes());
-        out.extend_from_slice(&self.initial.to_le_bytes());
+        out.push(width as u8);
         out.extend_from_slice(&(self.changes.len() as u16).to_le_bytes());
+        out.extend_from_slice(&self.initial);
         for (offset, state) in &self.changes {
             out.extend_from_slice(&offset.to_le_bytes());
-            out.extend_from_slice(&state.to_le_bytes());
+            out.extend_from_slice(state);
         }
         out
     }
     pub fn decode(b: &[u8]) -> Result<Self, StreamError> {
-        if b.len() < 30 || b[0] != MAGIC || b[1] != VERSION {
+        if b.len() < HEADER || b[0] != MAGIC || b[1] != VERSION {
             return Err(StreamError::Malformed);
         }
         let u64_at = |p: usize| u64::from_le_bytes(b[p..p + 8].try_into().unwrap_or([0; 8]));
-        let from_tick = u64_at(2);
-        let through_tick = u64_at(10);
-        let ack_through = u64_at(18);
-        let initial = u16::from_le_bytes([b[26], b[27]]);
-        let count = u16::from_le_bytes([b[28], b[29]]) as usize;
-        if count > MAX_CHANGES || b.len() != 30 + count * 6 {
+        let width = usize::from(b[26]);
+        let count = usize::from(u16::from_le_bytes([b[27], b[28]]));
+        if width > MAX_HELD_WIDTH
+            || count > MAX_CHANGES
+            || b.len() != HEADER + width + count * (4 + width)
+        {
             return Err(StreamError::Malformed);
         }
-        let changes = (0..count)
-            .map(|i| {
-                let p = 30 + i * 6;
+        let body = &b[HEADER..];
+        let (initial, rest) = body.split_at(width);
+        let changes = rest
+            .chunks_exact(4 + width)
+            .map(|c| {
                 (
-                    u32::from_le_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]]),
-                    u16::from_le_bytes([b[p + 4], b[p + 5]]),
+                    u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                    c[4..].to_vec(),
                 )
             })
             .collect();
         let frame = Self {
-            from_tick,
-            through_tick,
-            initial,
+            from_tick: u64_at(2),
+            through_tick: u64_at(10),
+            ack_through: u64_at(18),
+            initial: initial.to_vec(),
             changes,
-            ack_through,
         };
         frame.validate()?;
         Ok(frame)
     }
-    /// The per-tick controls this frame describes.
-    pub fn expand(&self) -> Vec<u16> {
+    /// The per-tick inputs this frame describes.
+    pub fn expand(&self) -> Vec<Vec<u8>> {
         let span = (self.through_tick - self.from_tick) as usize;
         let mut out = Vec::with_capacity(span);
-        let mut current = self.initial;
+        let mut current = &self.initial;
         let mut next = self.changes.iter().peekable();
         for k in 0..span {
             while let Some((offset, state)) = next.peek() {
-                if *offset as usize == k {
-                    current = *state;
-                    next.next();
-                } else {
+                if *offset as usize != k {
                     break;
                 }
+                current = state;
+                next.next();
             }
-            out.push(current);
+            out.push(current.clone());
         }
         out
     }
-    pub fn from_controls(from_tick: u64, controls: &[u16], ack_through: u64) -> Self {
+    pub fn from_inputs(from_tick: u64, inputs: &[Vec<u8>], ack_through: u64) -> Self {
+        let initial = inputs.first().cloned().unwrap_or_default();
         let mut changes = Vec::new();
-        let initial = controls.first().copied().unwrap_or(0);
-        let mut previous = initial;
-        for (k, c) in controls.iter().enumerate().skip(1) {
-            if *c != previous {
-                changes.push((k as u32, *c));
-                previous = *c;
+        let mut previous = &initial;
+        for (k, c) in inputs.iter().enumerate().skip(1) {
+            if c != previous {
+                changes.push((k as u32, c.clone()));
+                previous = c;
             }
         }
         Self {
             from_tick,
-            through_tick: from_tick + controls.len() as u64,
+            through_tick: from_tick + inputs.len() as u64,
             initial,
             changes,
             ack_through,
@@ -136,14 +151,14 @@ impl StreamFrame {
     }
 }
 
-/// Decides when a frame is worth sending. Idle players send (almost) nothing.
+/// Decides when a frame is worth sending to one peer. Idle participants send (almost) nothing.
 pub struct StreamSender {
-    log: VecDeque<u16>,
+    log: VecDeque<Vec<u8>>,
     /// Tick of `log[0]`.
     log_from: u64,
     peer_ack: u64,
     last_sent_tick: Option<u64>,
-    /// Highest tick whose control has been included in some sent frame.
+    /// Highest tick whose input has been included in some sent frame.
     sent_through: u64,
     needs_ack: bool,
     keepalive: u64,
@@ -165,20 +180,20 @@ impl StreamSender {
             blackout: None,
         }
     }
-    /// Suppress streaming for `[from, to)`: those ticks are hidden and are only
-    /// ever disclosed through the commit-reveal path.
+    /// Suppress streaming for `[from, to)`: those ticks are sealed and are only ever disclosed
+    /// through the commit-reveal path.
     pub fn set_blackout(&mut self, window: Option<(u64, u64)>) {
         self.blackout = window;
     }
     fn next_tick(&self) -> u64 {
         self.log_from + self.log.len() as u64
     }
-    pub fn push(&mut self, control: u16) {
-        self.log.push_back(control);
+    pub fn push(&mut self, input: Vec<u8>) {
+        self.log.push_back(input);
     }
     pub fn on_peer_ack(&mut self, ack_through: u64) {
         self.peer_ack = self.peer_ack.max(ack_through);
-        // Keep one tick before the ack so the first control of a frame is known.
+        // Keep one tick before the ack so the first input of a frame is known.
         while self.log_from + 1 < self.peer_ack.min(self.next_tick()) && self.log.len() > 1 {
             self.log.pop_front();
             self.log_from += 1;
@@ -188,17 +203,12 @@ impl StreamSender {
     pub fn note_received(&mut self) {
         self.needs_ack = true;
     }
-    fn control_at(&self, tick: u64) -> Option<u16> {
+    fn input_at(&self, tick: u64) -> Option<&Vec<u8>> {
         tick.checked_sub(self.log_from)
-            .and_then(|i| self.log.get(i as usize).copied())
+            .and_then(|i| self.log.get(i as usize))
     }
-    /// Frames worth sending now (usually none). A frame never describes a tick
-    /// inside the blackout, so a span that straddles it is split in two.
-    pub fn due(&mut self, now_tick: u64, ack_through: u64) -> Vec<StreamFrame> {
-        let next = self.next_tick();
-        if next <= self.log_from {
-            return Vec::new();
-        }
+    /// The unacknowledged spans, split around the blackout.
+    fn spans(&self, next: u64) -> Vec<(u64, u64)> {
         let mut lo = self
             .peer_ack
             .max(self.log_from)
@@ -220,29 +230,41 @@ impl StreamSender {
             None => spans.push((lo, next)),
         }
         spans.retain(|(s, e)| s < e);
-        if spans.is_empty() {
-            return Vec::new();
-        }
+        spans
+    }
+    /// Whether any sent-worthy change exists: `(important, unacked_change)`; `None` when a
+    /// needed input is no longer in the log.
+    fn changes(&self, spans: &[(u64, u64)], next: u64) -> Option<(bool, bool)> {
         let mut important = self
             .blackout
             .is_some_and(|(_, b)| next > b && self.sent_through <= b);
         let mut unacked_change = false;
-        for (start, end) in &spans {
-            let mut prev = start.checked_sub(1).and_then(|t| self.control_at(t));
+        for (start, end) in spans {
+            let mut prev = start.checked_sub(1).and_then(|t| self.input_at(t));
             for t in *start..*end {
-                let Some(c) = self.control_at(t) else {
-                    return Vec::new();
-                };
+                let c = self.input_at(t)?;
                 let changed = prev.is_some_and(|p| p != c);
-                if changed && t >= self.sent_through {
-                    important = true;
-                }
-                if changed && t >= self.peer_ack {
-                    unacked_change = true;
-                }
+                important |= changed && t >= self.sent_through;
+                unacked_change |= changed && t >= self.peer_ack;
                 prev = Some(c);
             }
         }
+        Some((important, unacked_change))
+    }
+    /// Frames worth sending now (usually none). A frame never describes a tick inside the
+    /// blackout, so a span that straddles it is split in two.
+    pub fn due(&mut self, now_tick: u64, ack_through: u64) -> Vec<StreamFrame> {
+        let next = self.next_tick();
+        if next <= self.log_from {
+            return Vec::new();
+        }
+        let spans = self.spans(next);
+        if spans.is_empty() {
+            return Vec::new();
+        }
+        let Some((important, unacked_change)) = self.changes(&spans, next) else {
+            return Vec::new();
+        };
         let since = now_tick.saturating_sub(self.last_sent_tick.unwrap_or(0));
         let send = important
             || self.needs_ack
@@ -254,9 +276,9 @@ impl StreamSender {
         let frames: Vec<StreamFrame> = spans
             .iter()
             .filter_map(|(start, end)| {
-                let controls: Option<Vec<u16>> =
-                    (*start..*end).map(|t| self.control_at(t)).collect();
-                controls.map(|c| StreamFrame::from_controls(*start, &c, ack_through))
+                let inputs: Option<Vec<Vec<u8>>> =
+                    (*start..*end).map(|t| self.input_at(t).cloned()).collect();
+                inputs.map(|c| StreamFrame::from_inputs(*start, &c, ack_through))
             })
             .collect();
         if !frames.is_empty() {

@@ -2,14 +2,15 @@
 //! failing store fails closed, and after a kill at EVERY persistence-to-send boundary a
 //! restarted participant never contradicts a head it already sent (`NoSelfEquivocation`).
 use super::auditor::{AuditEvent, Auditor};
-use super::msg::PipeMsg;
-use super::pipeline::{PipeEvent, Pipeline, PipelineConfig};
+use super::msg::{Dest, PipeMsg};
+use super::netsim::config;
+use super::pipeline::{PipeEvent, Pipeline};
 use crate::audit::failpoint::{self, Action};
 use crate::audit::journal::{FileTrustStore, TrustStore};
 use crate::audit::{AuditLog, Authenticator};
-use crate::testkit::GridRules;
-use crate::MatchReplica;
-use gv_core::PlayerId;
+use crate::fixtures::{controls, Cast};
+use crate::testkit::{self, GridRules};
+use gv_core::Roster;
 use gv_sig::SigningKey;
 use std::collections::VecDeque;
 use std::fs;
@@ -19,16 +20,13 @@ use std::path::{Path, PathBuf};
 const M: [u8; 32] = [7; 32];
 const R: [u8; 32] = [9; 32];
 
-fn keys() -> [SigningKey; 2] {
-    [
-        SigningKey::from_seed([1; 32]),
-        SigningKey::from_seed([2; 32]),
-    ]
+const PEERS: u8 = 3;
+
+fn cast() -> Cast {
+    Cast::new(PEERS, M)
 }
-fn roster() -> [PlayerId; 2] {
-    let mut r = keys().map(|k| k.id());
-    r.sort();
-    r
+fn keys() -> Vec<SigningKey> {
+    cast().keys
 }
 fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("gv-wal-{name}-{}", std::process::id()));
@@ -48,8 +46,9 @@ fn copy_dir(from: &Path, to: &Path) {
 // Real pipeline: the egress gate itself.
 
 struct Duo {
-    pipes: [Pipeline<GridRules>; 2],
-    wire: [VecDeque<Vec<u8>>; 2],
+    pipes: Vec<Pipeline<GridRules>>,
+    /// `wire[i]` = `(sender, bytes)` travelling to peer `i`.
+    wire: Vec<VecDeque<(usize, Vec<u8>)>>,
     sent0: Vec<PipeMsg>,
     events0: Vec<PipeEvent>,
     dir: PathBuf,
@@ -59,28 +58,22 @@ struct Duo {
 impl Duo {
     fn new(name: &str) -> Self {
         let dir = scratch(name);
-        let roster = roster();
-        let rules = GridRules::new(roster);
-        let mk = |i: usize| {
-            Pipeline::new(
-                keys()[i].clone(),
-                roster,
-                M,
-                rules.clone(),
-                MatchReplica::new(M, roster, rules.clone()).unwrap(),
-                PipelineConfig::default(),
-            )
-            .unwrap()
-        };
-        let mut pipes = [mk(0), mk(1)];
+        let cast = cast();
+        let mut pipes: Vec<_> = cast
+            .keys
+            .iter()
+            .map(|k| Pipeline::new(k.clone(), cast.replica(), config()).unwrap())
+            .collect();
         let (mut store, loaded) = FileTrustStore::open(dir.join("p0"), M, keys()[0].id()).unwrap();
         store.set_compact_at(40_000);
         assert!(loaded.heads.is_empty());
         pipes[0].auditor_mut().attach_store(Box::new(store), 0, 0);
-        pipes[1].auditor_mut().use_ephemeral_store_for_tests();
+        for p in &mut pipes[1..] {
+            p.auditor_mut().use_ephemeral_store_for_tests();
+        }
         Self {
             pipes,
-            wire: [VecDeque::new(), VecDeque::new()],
+            wire: (0..PEERS).map(|_| VecDeque::new()).collect(),
             sent0: Vec::new(),
             events0: Vec::new(),
             dir,
@@ -91,32 +84,42 @@ impl Duo {
         for _ in 0..ticks {
             self.now += 1;
             let now = self.now;
-            for i in 0..2 {
-                let own = move |from: u64, to: u64| -> Option<Vec<u16>> {
+            for i in 0..self.pipes.len() {
+                let own = move |from: u64, to: u64| -> Option<Vec<Vec<u8>>> {
                     (to <= now).then(|| {
                         (from..to)
-                            .map(|k| if k % 30 < 4 { crate::testkit::UP } else { 0u16 })
+                            .map(|k| controls(if k % 30 < 4 { testkit::UP } else { 0u16 }))
                             .collect()
                     })
                 };
                 self.pipes[i].tick(now, &own);
                 self.flush(i);
-                while let Some(bytes) = self.wire[i].pop_front() {
+                while let Some((from, bytes)) = self.wire[i].pop_front() {
                     let msg = PipeMsg::decode(&bytes).unwrap();
-                    self.pipes[i].on_message(msg, now, &own);
+                    let sender = keys()[from].id();
+                    self.pipes[i].on_message(sender, msg, now, &own);
                     self.flush(i);
                 }
             }
         }
     }
     fn flush(&mut self, i: usize) {
-        while let Some(m) = self.pipes[i].poll_outbox() {
+        while let Some(out) = self.pipes[i].poll_outbox() {
             if i == 0 {
                 // The write-ahead property, checked at the instant of egress.
-                self.assert_durable(&m);
-                self.sent0.push(m.clone());
+                self.assert_durable(&out.msg);
+                self.sent0.push(out.msg.clone());
             }
-            self.wire[1 - i].push_back(m.encode().unwrap());
+            let bytes = out.msg.encode().unwrap();
+            for to in 0..self.pipes.len() {
+                let wanted = match out.to {
+                    Dest::All => to != i,
+                    Dest::Peer(id) => keys()[to].id() == id,
+                };
+                if wanted {
+                    self.wire[to].push_back((i, bytes.clone()));
+                }
+            }
         }
         while let Some(e) = self.pipes[i].poll_event() {
             if i == 0 {
@@ -221,7 +224,13 @@ fn crash_child() {
     let nonce: u8 = std::env::var("GV_WAL_NONCE").unwrap().parse().unwrap();
     let me = keys()[0].clone();
     let other = keys()[1].clone();
-    let mut au = Auditor::new(me.clone(), [me.id(), other.id()], M, R).unwrap();
+    let mut au = Auditor::new(
+        me.clone(),
+        &Roster::players(&[me.id(), other.id()]).unwrap(),
+        M,
+        R,
+    )
+    .unwrap();
     let (mut store, loaded) = FileTrustStore::open(dir.join("node"), M, me.id()).unwrap();
     store.set_compact_at(6_000);
     let top = loaded.heads.iter().map(|h| h.seq).max().unwrap_or(0);
@@ -259,7 +268,7 @@ fn crash_child() {
         au.test_append(2, vec![nonce, i as u8]);
         au.on_epoch(now);
         while let Some(m) = au.poll_msg() {
-            let PipeMsg::Auth(a) = m else { continue };
+            let PipeMsg::Auth(a) = m.msg else { continue };
             if !unsafe_order && !au.make_durable() {
                 std::process::exit(4); // fail closed
             }
@@ -433,7 +442,13 @@ fn _assert_object_safe(_: &dyn TrustStore) {}
 #[test]
 fn without_a_durable_store_nothing_signed_is_released() {
     let (me, other) = (keys()[0].clone(), keys()[1].clone());
-    let mut au = Auditor::new(me.clone(), [me.id(), other.id()], M, R).unwrap();
+    let mut au = Auditor::new(
+        me.clone(),
+        &Roster::players(&[me.id(), other.id()]).unwrap(),
+        M,
+        R,
+    )
+    .unwrap();
     au.test_append(1, vec![1]);
     assert!(!au.make_durable(), "a missing store must fail closed");
     assert!(au.persistence_failed());

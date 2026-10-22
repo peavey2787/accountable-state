@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 gv-core = { path = "../../crates/core" }
+gv-codec = { path = "../../crates/codec" }
 gv-commitments = { path = "../../crates/commitments" }

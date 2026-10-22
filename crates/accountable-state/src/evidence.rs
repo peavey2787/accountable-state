@@ -1,4 +1,4 @@
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, Session};
 use gv_edge::audit::Evidence;
 use gv_edge::export::{
     export_fraud, Commitment, DisclosurePolicy, ExportError, FraudWitness, Package, PackageKind,
@@ -52,21 +52,13 @@ pub enum ExportQuery {
 /// The context every package binds.
 pub(crate) struct Context<'a, M> {
     pub machine: &'a M,
-    pub match_id: MatchId,
-    pub roster: [PlayerId; 2],
+    pub session: &'a Session,
     pub disclosure: DisclosurePolicy,
 }
 
 impl<M: StateMachine> Context<'_, M> {
     fn fraud(&self, witness: FraudWitness<'_>) -> Option<EvidencePackage> {
-        let pkg = export_fraud(
-            self.machine,
-            self.match_id,
-            self.roster,
-            witness,
-            self.disclosure,
-        )
-        .ok()?;
+        let pkg = export_fraud(self.machine, self.session, witness, self.disclosure).ok()?;
         EvidencePackage::new(pkg).ok()
     }
     /// The package for an observed violation, if its evidence is self-sufficient. A false

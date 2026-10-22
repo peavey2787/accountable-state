@@ -1,0 +1,14 @@
+{
+  "format": "GV-PACKING-SIZES-V2",
+  "signature_bytes": 3309,
+  "max_aggregate_records": 4096,
+  "scenarios": [
+    {"name": "1v1, 10 min, 2 changes/s, one record per player", "players": 2, "seconds": 600, "ticks_per_second": 60, "events_per_second": 2, "width": 1, "batch_ticks": 0, "records": 2, "aggregates": 2, "bytes": 11666},
+    {"name": "1v1, 1 h, 2 changes/s, one record per player", "players": 2, "seconds": 3600, "ticks_per_second": 60, "events_per_second": 2, "width": 1, "batch_ticks": 0, "records": 2, "aggregates": 2, "bytes": 35668},
+    {"name": "16 players, 10 min, 2 changes/s, one record per player", "players": 16, "seconds": 600, "ticks_per_second": 60, "events_per_second": 2, "width": 1, "batch_ticks": 0, "records": 16, "aggregates": 16, "bytes": 93328},
+    {"name": "1v1, 1 h, 60 Hz digital updates, one record per player", "players": 2, "seconds": 3600, "ticks_per_second": 60, "events_per_second": 60, "width": 1, "batch_ticks": 0, "records": 2, "aggregates": 2, "bytes": 870870},
+    {"name": "1v1, 10 min, 2 changes/s, live epochs of 20 ticks", "players": 2, "seconds": 600, "ticks_per_second": 60, "events_per_second": 2, "width": 1, "batch_ticks": 20, "records": 3600, "aggregates": 2, "bytes": 12343214},
+    {"name": "1v1, 1 h, 2 changes/s, live epochs of 20 ticks", "players": 2, "seconds": 3600, "ticks_per_second": 60, "events_per_second": 2, "width": 1, "batch_ticks": 20, "records": 21600, "aggregates": 6, "bytes": 74059242},
+    {"name": "4 players, 10 min at 30 Hz, 2 changes/s, epochs of 30 ticks", "players": 4, "seconds": 600, "ticks_per_second": 30, "events_per_second": 2, "width": 1, "batch_ticks": 30, "records": 2400, "aggregates": 4, "bytes": 8232028}
+  ]
+}

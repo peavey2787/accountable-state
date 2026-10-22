@@ -155,29 +155,30 @@ pub fn reassemble(chunks: &[Vec<u8>], expected_hash: Digest) -> Result<Aggregate
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ControlChange, PackedControls, SignedPackedControls};
+    use crate::{EventBatch, EventBody, HeldChange, SignedEventBatch};
     use gv_sig::SigningKey;
 
     fn sample() -> Aggregate {
         let k = SigningKey::from_seed([9; 32]);
         let changes = (1..100)
-            .map(|i| ControlChange {
+            .map(|i| HeldChange {
                 offset: i,
-                state: u16::from(i % 2 != 0),
+                payload: vec![u8::from(i % 2 != 0)],
             })
             .collect();
-        let rec = PackedControls {
+        let rec = EventBatch {
             match_id: [1; 32],
-            player: k.id(),
+            participant: k.id(),
             previous_batch_hash: [2; 32],
             start_tick: 0,
             tick_count: 100,
-            control_bytes: 1,
-            initial_state: 0,
-            changes,
+            body: EventBody::Held {
+                initial: vec![0],
+                changes,
+            },
         };
         Aggregate {
-            records: vec![SignedPackedControls::sign(rec, &k).unwrap()],
+            records: vec![SignedEventBatch::sign(rec, &k).unwrap()],
         }
     }
 

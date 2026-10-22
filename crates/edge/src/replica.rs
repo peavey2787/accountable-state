@@ -1,119 +1,79 @@
-use super::checkpoint::{Checkpoint, CheckpointError, SignedCheckpoint};
-use gv_codec::SignedPackedControls;
-use gv_commitments::{commit_state, MerkleLog};
-use gv_core::{Digest, MatchId, PlayerId, StateOpening};
-use gv_replay::{RuleError, StateMachine};
+use super::checkpoint::{
+    inputs_root, state_commitment, Checkpoint, CheckpointError, SignedCheckpoint, MAX_EPOCH_TICKS,
+};
+use gv_codec::SignedEventBatch;
+use gv_core::{Digest, MatchId, Session};
+use gv_replay::{replay_epoch, InputViolation, ReplayError, StateMachine, MAX_STATE_BYTES};
 use gv_sig::SigningKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EdgeError {
-    InvalidRoster,
     MissingBatch,
-    WrongPlayer,
+    /// The batch's author is not a submitting member of the roster.
+    WrongParticipant,
     BadSignature,
     WrongMatch,
     WrongEpoch,
     BrokenChain,
     BadCheckpoint,
+    /// Strict replay found an event the rules deterministically reject.
     InvalidAction,
+    /// The rules failed to execute; never evidence against a participant.
+    RuleFailure,
     ResourceLimit,
     AlreadyAccepted,
+    /// The signatures do not satisfy the session's certification policy.
+    NotCertified,
 }
 
-/// A signed control word the ruleset rejected as illegal. In live (sanitized)
-/// replay it is replaced by a neutral input so honest play cannot be stalled,
-/// and this record is the portable proof of who sent what at which tick.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InputViolation {
-    pub player: PlayerId,
-    pub tick: u64,
-    pub control: u16,
-}
-
-/// One authenticated rules step. With `sanitize`, an illegal control word is
-/// replayed as neutral (control 0) and reported; every honest replayer and every
-/// independent verifier substitutes identically, so the resulting state is
-/// deterministic. Without it, an illegal action is an error (strict mode).
-pub fn apply_tick<R: StateMachine>(
-    rules: &R,
-    state: &[u8],
-    player: &PlayerId,
-    tick: u64,
-    control: u16,
-    sanitize: bool,
-) -> Result<(Vec<u8>, Option<InputViolation>), EdgeError> {
-    let encode = |control: u16| {
-        let mut input = Vec::with_capacity(42);
-        input.extend_from_slice(player);
-        input.extend_from_slice(&tick.to_le_bytes());
-        input.extend_from_slice(&control.to_le_bytes());
-        input
-    };
-    match rules.apply(state, &encode(control)) {
-        Ok(next) => Ok((next, None)),
-        Err(RuleError::InvalidAction(_)) if sanitize => rules
-            .apply(state, &encode(0))
-            .map(|next| {
-                (
-                    next,
-                    Some(InputViolation {
-                        player: *player,
-                        tick,
-                        control,
-                    }),
-                )
-            })
-            .map_err(|_| EdgeError::InvalidAction),
-        Err(_) => Err(EdgeError::InvalidAction),
-    }
-}
-
+/// One epoch of the chain: the checkpoint, the exact inputs it commits to (by roster slot) and,
+/// once finalized, the signatures that certify it.
 #[derive(Clone, Debug)]
 pub struct Epoch {
     pub checkpoint: Checkpoint,
-    pub batches: [SignedPackedControls; 2],
+    /// One entry per roster slot; `None` is a slot that contributed nothing to the epoch.
+    pub inputs: Vec<Option<SignedEventBatch>>,
     pub previous_state: Vec<u8>,
     pub next_state: Vec<u8>,
-    /// Both players' signed identical checkpoints, present only after finalization.
-    pub signatures: Option<[SignedCheckpoint; 2]>,
+    /// Signatures satisfying the session's certification policy, present only after
+    /// finalization, in roster order.
+    pub signatures: Option<Vec<SignedCheckpoint>>,
 }
 
 pub struct MatchReplica<R: StateMachine> {
-    pub match_id: MatchId,
-    pub roster: [PlayerId; 2],
+    pub session: Session,
     pub rules: R,
     state: Vec<u8>,
     previous_checkpoint: Digest,
     next_tick: u64,
-    head: [Digest; 2],
-    proposed: [Option<SignedPackedControls>; 2],
+    head: Vec<Digest>,
+    proposed: Vec<Option<SignedEventBatch>>,
     accepted: Vec<Epoch>,
     sanitize: bool,
 }
 impl<R: StateMachine> MatchReplica<R> {
-    pub fn new(match_id: MatchId, mut roster: [PlayerId; 2], rules: R) -> Result<Self, EdgeError> {
-        roster.sort();
-        if roster[0] == roster[1] {
-            return Err(EdgeError::InvalidRoster);
-        }
-        let state = rules.genesis(&roster);
-        if state.len() > 65536 {
+    pub fn new(session: Session, rules: R) -> Result<Self, EdgeError> {
+        let state = rules.genesis(&session);
+        if state.len() > MAX_STATE_BYTES {
             return Err(EdgeError::ResourceLimit);
         }
+        let slots = session.roster.len();
         Ok(Self {
-            match_id,
-            roster,
+            session,
             rules,
             state,
             previous_checkpoint: [0; 32],
             next_tick: 0,
-            head: [[0; 32]; 2],
-            proposed: [None, None],
+            head: vec![[0; 32]; slots],
+            proposed: vec![None; slots],
             accepted: vec![],
             sanitize: false,
         })
     }
-    /// Live play: illegal controls are neutralized and reported instead of
+    pub fn match_id(&self) -> MatchId {
+        self.session.match_id
+    }
+    /// Live play: illegal events are neutralized and reported instead of
     /// making the epoch impossible to certify.
     #[must_use]
     pub fn live(mut self) -> Self {
@@ -135,144 +95,167 @@ impl<R: StateMachine> MatchReplica<R> {
     pub fn accepted(&self) -> &[Epoch] {
         &self.accepted
     }
-    pub fn next_batch_head(&self, player: PlayerId) -> Option<Digest> {
-        self.roster
-            .iter()
-            .position(|p| *p == player)
+    pub fn next_batch_head(&self, participant: gv_core::ParticipantId) -> Option<Digest> {
+        self.session
+            .roster
+            .index_of(&participant)
             .map(|i| self.head[i])
     }
-    /// Stage one authenticated batch for the current epoch. Both must have equal
-    /// start and tick count; this does NOT decide who submitted in time.
-    pub fn admit(&mut self, batch: SignedPackedControls) -> Result<(), EdgeError> {
+    /// Stage one authenticated batch for the current epoch. All staged batches must have the
+    /// same start and tick count; this does NOT decide who submitted in time.
+    pub fn admit(&mut self, batch: SignedEventBatch) -> Result<(), EdgeError> {
         batch.verify().map_err(|_| EdgeError::BadSignature)?;
-        if batch.record.match_id != self.match_id {
+        if batch.record.match_id != self.session.match_id {
             return Err(EdgeError::WrongMatch);
         }
-        let Some(i) = self.roster.iter().position(|p| *p == batch.record.player) else {
-            return Err(EdgeError::WrongPlayer);
-        };
-        if self.proposed[i].is_some() {
+        let slot = self
+            .session
+            .roster
+            .index_of(&batch.record.participant)
+            .filter(|s| {
+                self.session
+                    .roster
+                    .get(*s)
+                    .is_some_and(|p| p.role.submits())
+            })
+            .ok_or(EdgeError::WrongParticipant)?;
+        if self.proposed[slot].is_some() {
             return Err(EdgeError::AlreadyAccepted);
         }
         if batch.record.start_tick != self.next_tick
-            || batch.record.previous_batch_hash != self.head[i]
+            || batch.record.previous_batch_hash != self.head[slot]
         {
             return Err(EdgeError::BrokenChain);
         }
-        if let Some(other) = self.proposed[1 - i].as_ref() {
-            if other.record.tick_count != batch.record.tick_count {
-                return Err(EdgeError::WrongEpoch);
-            }
+        if self
+            .proposed
+            .iter()
+            .flatten()
+            .any(|other| other.record.tick_count != batch.record.tick_count)
+        {
+            return Err(EdgeError::WrongEpoch);
         }
-        self.proposed[i] = Some(batch);
+        self.proposed[slot] = Some(batch);
         Ok(())
     }
-    pub fn pending_complete(&self) -> bool {
-        self.proposed.iter().all(Option::is_some)
+    /// Drop every staged batch (an epoch that could not be completed).
+    pub fn discard_pending(&mut self) {
+        self.proposed = vec![None; self.session.roster.len()];
     }
-    /// Deterministic candidate; does not finalize until both signatures match.
+    /// Every submitting participant has staged a batch.
+    pub fn pending_complete(&self) -> bool {
+        self.session
+            .roster
+            .submitters()
+            .iter()
+            .all(|slot| self.proposed[*slot].is_some())
+    }
+    /// Deterministic candidate; does not finalize until the certification policy is met.
     pub fn candidate(&self) -> Result<Epoch, EdgeError> {
         self.candidate_with_violations().map(|(epoch, _)| epoch)
     }
-    /// Candidate plus every illegal input neutralized while replaying it.
+    /// Candidate plus every illegal event neutralized while replaying it. Slots that staged
+    /// nothing are committed as absent.
     pub fn candidate_with_violations(&self) -> Result<(Epoch, Vec<InputViolation>), EdgeError> {
-        let a = self.proposed[0].as_ref().ok_or(EdgeError::MissingBatch)?;
-        let b = self.proposed[1].as_ref().ok_or(EdgeError::MissingBatch)?;
-        let count = a.record.tick_count;
-        if count == 0 || count > 4096 {
+        let count = self
+            .proposed
+            .iter()
+            .flatten()
+            .map(|b| b.record.tick_count)
+            .next()
+            .ok_or(EdgeError::MissingBatch)?;
+        if count == 0 || count > MAX_EPOCH_TICKS {
             return Err(EdgeError::ResourceLimit);
         }
-        if b.record.tick_count != count || self.next_tick.checked_add(u64::from(count)).is_none() {
+        if self.next_tick.checked_add(u64::from(count)).is_none() {
             return Err(EdgeError::WrongEpoch);
         }
-        let mut log = MerkleLog::new();
-        for b in [a, b] {
-            log.append(&b.encode().map_err(|_| EdgeError::BadSignature)?)
-                .map_err(|_| EdgeError::ResourceLimit)?;
-        }
-        let mut next = self.state.clone();
-        let mut violations = Vec::new();
-        for offset in 0..count {
-            for batch in [a, b] {
-                let control = batch
-                    .record
-                    .state_at(offset)
-                    .map_err(|_| EdgeError::InvalidAction)?;
-                let (state, violation) = apply_tick(
-                    &self.rules,
-                    &next,
-                    &batch.record.player,
-                    self.next_tick + u64::from(offset),
-                    control,
-                    self.sanitize,
-                )?;
-                next = state;
-                violations.extend(violation);
-                if next.len() > 65536 {
-                    return Err(EdgeError::ResourceLimit);
-                }
-            }
-        }
+        let refs: Vec<_> = self.proposed.iter().map(Option::as_ref).collect();
+        let records: Vec<_> = refs.iter().map(|b| b.map(|b| &b.record)).collect();
+        let replayed = replay_epoch(
+            &self.rules,
+            &self.session,
+            &self.state,
+            self.next_tick,
+            count,
+            &records,
+            self.sanitize,
+        )
+        .map_err(EdgeError::from)?;
         let checkpoint = Checkpoint {
-            match_id: self.match_id,
+            match_id: self.session.match_id,
+            session: self.session.digest(),
             ruleset: self.rules.ruleset_hash(),
             epoch_start: self.next_tick,
             epoch_length: count,
             previous_checkpoint: self.previous_checkpoint,
-            previous_state: commit_state(&StateOpening {
-                bytes: self.state.clone(),
-                nonce: [0; 32],
-            }),
-            input_root: log.root(),
-            next_state: commit_state(&StateOpening {
-                bytes: next.clone(),
-                nonce: [0; 32],
-            }),
+            previous_state: state_commitment(&self.state),
+            input_root: inputs_root(&refs).map_err(|_| EdgeError::BadSignature)?,
+            next_state: state_commitment(&replayed.state),
         };
         Ok((
             Epoch {
                 checkpoint,
-                batches: [a.clone(), b.clone()],
+                inputs: self.proposed.clone(),
                 previous_state: self.state.clone(),
-                next_state: next,
+                next_state: replayed.state,
                 signatures: None,
             },
-            violations,
+            replayed.violations,
         ))
     }
     pub fn sign_candidate(&self, key: &SigningKey) -> Result<SignedCheckpoint, EdgeError> {
-        if !self.roster.contains(&key.id()) {
-            return Err(EdgeError::WrongPlayer);
+        if !self
+            .session
+            .roster
+            .find(&key.id())
+            .is_some_and(|p| p.role.signs())
+        {
+            return Err(EdgeError::WrongParticipant);
         }
         Ok(SignedCheckpoint::sign(self.candidate()?.checkpoint, key))
     }
-    /// Exact dual-signature agreement is required: no single client can finalize
-    /// a history the other did not sign. This is *not* liveness under 1 Byzantine.
-    pub fn finalize(&mut self, signatures: [SignedCheckpoint; 2]) -> Result<Digest, EdgeError> {
+    /// The session's certification policy decides how many matching signatures finalize an
+    /// epoch. No signer can finalize a history the policy does not accept, and an epoch
+    /// certified by a threshold is still only as strong as that threshold: it is not global
+    /// consensus.
+    pub fn finalize(&mut self, signatures: Vec<SignedCheckpoint>) -> Result<Digest, EdgeError> {
         let mut epoch = self.candidate()?;
-        let digest = epoch.checkpoint.digest();
-        for (i, s) in signatures.iter().enumerate() {
+        let roster = &self.session.roster;
+        let mut slots = Vec::with_capacity(signatures.len());
+        for s in &signatures {
             s.verify().map_err(|_| EdgeError::BadSignature)?;
-            if s.player != self.roster[i] || s.claim != epoch.checkpoint {
+            let slot = roster
+                .index_of(&s.signer)
+                .filter(|slot| roster.get(*slot).is_some_and(|p| p.role.signs()))
+                .ok_or(EdgeError::WrongParticipant)?;
+            if s.claim != epoch.checkpoint || slots.contains(&slot) {
                 return Err(EdgeError::BadCheckpoint);
             }
+            slots.push(slot);
         }
-        self.head[0] = epoch.batches[0]
-            .digest()
-            .map_err(|_| EdgeError::BadSignature)?;
-        self.head[1] = epoch.batches[1]
-            .digest()
-            .map_err(|_| EdgeError::BadSignature)?;
+        if !self.session.certification.satisfied(roster, &slots) {
+            return Err(EdgeError::NotCertified);
+        }
+        let mut ordered: Vec<_> = slots.into_iter().zip(signatures).collect();
+        ordered.sort_by_key(|(slot, _)| *slot);
+        epoch.signatures = Some(ordered.into_iter().map(|(_, s)| s).collect());
+        self.advance(epoch)
+    }
+    fn advance(&mut self, epoch: Epoch) -> Result<Digest, EdgeError> {
+        let digest = epoch.checkpoint.digest();
+        for (slot, input) in epoch.inputs.iter().enumerate() {
+            if let Some(batch) = input {
+                self.head[slot] = batch.digest().map_err(|_| EdgeError::BadSignature)?;
+            }
+        }
         self.next_tick += u64::from(epoch.checkpoint.epoch_length);
         self.previous_checkpoint = digest;
         self.state = epoch.next_state.clone();
-        epoch.signatures = Some(signatures);
         self.accepted.push(epoch);
-        self.proposed = [None, None];
+        self.proposed = vec![None; self.session.roster.len()];
         Ok(digest)
     }
-}
-impl<R: StateMachine> MatchReplica<R> {
     /// Drop all but the newest `keep` accepted epochs. A long live match
     /// certifies thousands of epochs; the durable record is the receipt archive,
     /// so the replica only needs the chain head (state, tick, checkpoint hash).
@@ -280,26 +263,24 @@ impl<R: StateMachine> MatchReplica<R> {
         let excess = self.accepted.len().saturating_sub(keep);
         self.accepted.drain(..excess);
     }
-    /// Advance past an epoch whose co-signature was refused because one party
+    /// Advance past an epoch whose certification was refused because a signer
     /// signed a provably false claim. The caller MUST already hold independent
     /// evidence (`verify_checkpoint_evidence` => `ProvenInvalidState`); the
     /// honest, replayed candidate becomes the chain head. The epoch is kept
-    /// without a dual signature, so it cannot be exported as a certified receipt.
+    /// without signatures, so it cannot be exported as a certified receipt.
     pub fn finalize_disputed(&mut self) -> Result<Digest, EdgeError> {
         let epoch = self.candidate()?;
-        let digest = epoch.checkpoint.digest();
-        self.head[0] = epoch.batches[0]
-            .digest()
-            .map_err(|_| EdgeError::BadSignature)?;
-        self.head[1] = epoch.batches[1]
-            .digest()
-            .map_err(|_| EdgeError::BadSignature)?;
-        self.next_tick += u64::from(epoch.checkpoint.epoch_length);
-        self.previous_checkpoint = digest;
-        self.state = epoch.next_state.clone();
-        self.accepted.push(epoch);
-        self.proposed = [None, None];
-        Ok(digest)
+        self.advance(epoch)
+    }
+}
+impl From<ReplayError> for EdgeError {
+    fn from(e: ReplayError) -> Self {
+        match e {
+            ReplayError::Violation(_) => Self::InvalidAction,
+            ReplayError::Execution(_) => Self::RuleFailure,
+            ReplayError::StateTooLarge => Self::ResourceLimit,
+            ReplayError::Malformed => Self::WrongEpoch,
+        }
     }
 }
 impl From<CheckpointError> for EdgeError {

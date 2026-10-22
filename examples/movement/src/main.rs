@@ -1,6 +1,6 @@
 //! Signed inputs + Merkle inclusion + deterministic replay. No network finality.
 use gv_commitments::{commit_state, verify_membership, MerkleLog};
-use gv_core::{Digest, PlayerId, StateOpening};
+use gv_core::{Digest, Session, StateOpening};
 use gv_replay::{verify_transition, RuleError, StateMachine, ViolationCode};
 use gv_sig::SigningKey;
 use gv_transcript::SignedInput;
@@ -17,7 +17,7 @@ impl StateMachine for ToyMovement {
     fn ruleset_hash(&self) -> Digest {
         [9; 32]
     }
-    fn genesis(&self, _: &[PlayerId; 2]) -> Vec<u8> {
+    fn genesis(&self, _: &Session) -> Vec<u8> {
         0i64.to_le_bytes().to_vec()
     }
     fn apply(&self, previous: &[u8], input: &[u8]) -> Result<Vec<u8>, RuleError> {

@@ -6,7 +6,7 @@
 //!   binds protocol version, algorithm id, the signer's identity and an explicit
 //!   per-message-type label to the message body. Message bodies bind match id,
 //!   ruleset, tick/sequence and predecessor commitments themselves.
-//! * A `PlayerId` is `SHA-256("gv/player-id/v1" || alg || verifying key)`: a
+//! * A `ParticipantId` is `SHA-256("gv/player-id/v1" || alg || verifying key)`: a
 //!   fixed 32-byte name for a 1952-byte key. Keys are interned in a
 //!   content-addressed table, so an entry can never disagree with its id.
 //!
@@ -14,7 +14,7 @@
 //! for evidence: only these signatures are verifiable by third parties.
 #![forbid(unsafe_code)]
 
-use gv_core::PlayerId;
+use gv_core::ParticipantId;
 use hydra_core::{ML_DSA_65_SIG_SIZE, ML_DSA_65_VK_SIZE};
 use hydra_crypto::{MlDsaKeyPair, MlDsaVerificationKey};
 use sha2::{Digest as _, Sha256, Sha512};
@@ -95,7 +95,7 @@ impl SignatureScheme for HydraMlDsa65 {
 
 type Scheme = HydraMlDsa65;
 
-pub fn player_id_of(vk: &[u8]) -> PlayerId {
+pub fn player_id_of(vk: &[u8]) -> ParticipantId {
     let mut h = Sha256::new();
     h.update(b"gv/player-id/v1\0");
     h.update([ALG_ML_DSA_65]);
@@ -107,13 +107,13 @@ struct Interned {
     bytes: Box<[u8; VK_LEN]>,
     verifier: <Scheme as SignatureScheme>::Verifier,
 }
-static KEYS: OnceLock<RwLock<HashMap<PlayerId, Arc<Interned>>>> = OnceLock::new();
-fn table() -> &'static RwLock<HashMap<PlayerId, Arc<Interned>>> {
+static KEYS: OnceLock<RwLock<HashMap<ParticipantId, Arc<Interned>>>> = OnceLock::new();
+fn table() -> &'static RwLock<HashMap<ParticipantId, Arc<Interned>>> {
     KEYS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Interns a verifying key and returns its `PlayerId`. Idempotent.
-pub fn register_key(vk: &[u8]) -> Result<PlayerId, SigError> {
+/// Interns a verifying key and returns its `ParticipantId`. Idempotent.
+pub fn register_key(vk: &[u8]) -> Result<ParticipantId, SigError> {
     let arr: [u8; VK_LEN] = vk.try_into().map_err(|_| SigError::BadLength)?;
     let id = player_id_of(&arr);
     if table()
@@ -138,12 +138,12 @@ pub fn register_key(vk: &[u8]) -> Result<PlayerId, SigError> {
 }
 
 /// The verifying-key bytes for an interned player, if known.
-pub fn public_key_bytes(id: &PlayerId) -> Option<Vec<u8>> {
+pub fn public_key_bytes(id: &ParticipantId) -> Option<Vec<u8>> {
     table().read().ok()?.get(id).map(|k| k.bytes.to_vec())
 }
 
 /// True when the key for `id` is known (verification will not fail as `UnknownSigner`).
-pub fn is_known(id: &PlayerId) -> bool {
+pub fn is_known(id: &ParticipantId) -> bool {
     table().read().map(|t| t.contains_key(id)).unwrap_or(false)
 }
 
@@ -164,7 +164,7 @@ pub fn encode_public_key_file(vk: &[u8; VK_LEN]) -> Vec<u8> {
 }
 
 /// Parses a public-key file, interns the key and returns the player's id.
-pub fn decode_public_key_file(b: &[u8]) -> Result<PlayerId, SigError> {
+pub fn decode_public_key_file(b: &[u8]) -> Result<ParticipantId, SigError> {
     const MAGIC: &[u8] = b"GV-PUBKEY/V1\0";
     let rest = b.strip_prefix(MAGIC).ok_or(SigError::BadLength)?;
     let (alg, vk) = rest.split_first().ok_or(SigError::BadLength)?;
@@ -176,7 +176,7 @@ pub fn decode_public_key_file(b: &[u8]) -> Result<PlayerId, SigError> {
 
 /// The exact 64-byte message ML-DSA signs for `(label, signer, body)`; public so
 /// independent implementations can reproduce and verify it.
-pub fn envelope_digest(label: &str, signer: &PlayerId, body: &[u8]) -> [u8; 64] {
+pub fn envelope_digest(label: &str, signer: &ParticipantId, body: &[u8]) -> [u8; 64] {
     let mut h = Sha512::new();
     h.update(b"gv/sig-envelope\0");
     h.update([SIG_VERSION, ALG_ML_DSA_65]);
@@ -194,7 +194,7 @@ pub fn envelope_digest(label: &str, signer: &PlayerId, body: &[u8]) -> [u8; 64] 
 pub struct SigningKey {
     pair: Arc<MlDsaKeyPair>,
     vk: [u8; VK_LEN],
-    id: PlayerId,
+    id: ParticipantId,
 }
 
 impl SigningKey {
@@ -217,7 +217,7 @@ impl SigningKey {
             id,
         })
     }
-    pub fn id(&self) -> PlayerId {
+    pub fn id(&self) -> ParticipantId {
         self.id
     }
     pub fn public_key(&self) -> &[u8; VK_LEN] {
@@ -237,7 +237,7 @@ impl SigningKey {
 
 /// Strict verification of `sig` by `signer` over `(label, body)`.
 pub fn verify(
-    signer: &PlayerId,
+    signer: &ParticipantId,
     label: &str,
     body: &[u8],
     sig: &Signature,

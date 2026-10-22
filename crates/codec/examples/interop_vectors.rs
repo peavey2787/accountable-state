@@ -1,6 +1,6 @@
 //! Regenerates the committed ML-DSA-65 interoperability vectors:
 //! `cargo run -p gv-codec --example interop_vectors -- tests/interoperability`.
-use gv_codec::{Aggregate, ControlChange, PackedControls, SignedPackedControls};
+use gv_codec::{Aggregate, EventBatch, EventBody, HeldChange, SignedEventBatch};
 use gv_sig::SigningKey;
 use std::fs;
 use std::path::Path;
@@ -27,26 +27,27 @@ fn write_vectors(dir: &str) -> Result<(), String> {
         hex(&digest),
         hex(sig.as_bytes())
     );
-    let record = PackedControls {
+    let record = EventBatch {
         match_id: [1; 32],
-        player: key.id(),
+        participant: key.id(),
         previous_batch_hash: [2; 32],
         start_tick: 500,
         tick_count: 180,
-        control_bytes: 1,
-        initial_state: 1,
-        changes: vec![ControlChange {
-            offset: 179,
-            state: 0,
-        }],
+        body: EventBody::Held {
+            initial: vec![1],
+            changes: vec![HeldChange {
+                offset: 179,
+                payload: vec![0],
+            }],
+        },
     };
-    let signed = SignedPackedControls::sign(record.clone(), &key).map_err(|e| format!("{e:?}"))?;
+    let signed = SignedEventBatch::sign(record.clone(), &key).map_err(|e| format!("{e:?}"))?;
     let aggregate = Aggregate {
         records: vec![signed.clone()],
     };
     let agg_bytes = aggregate.encode().map_err(|e| format!("{e:?}"))?;
     let packed_vector = format!(
-        "{{\n  \"format\": \"GVEC-GVAG-v1\",\n  \"verifying_key_hex\": \"{}\",\n  \"player_id_hex\": \"{}\",\n  \"record_hex\": \"{}\",\n  \"signature_hex\": \"{}\",\n  \"signed_record_hash\": \"{}\",\n  \"aggregate_hash\": \"{}\",\n  \"aggregate_length\": {}\n}}\n",
+        "{{\n  \"format\": \"GVEC-GVAG-v2\",\n  \"verifying_key_hex\": \"{}\",\n  \"player_id_hex\": \"{}\",\n  \"record_hex\": \"{}\",\n  \"signature_hex\": \"{}\",\n  \"signed_record_hash\": \"{}\",\n  \"aggregate_hash\": \"{}\",\n  \"aggregate_length\": {}\n}}\n",
         hex(key.public_key()),
         hex(&key.id()),
         hex(&record.encode().map_err(|e| format!("{e:?}"))?),
@@ -57,11 +58,8 @@ fn write_vectors(dir: &str) -> Result<(), String> {
     );
     fs::write(Path::new(dir).join("signed_mldsa65_v1.json"), signed_vector)
         .map_err(|e| e.to_string())?;
-    fs::write(
-        Path::new(dir).join("packed_controls_v1.json"),
-        packed_vector,
-    )
-    .map_err(|e| e.to_string())?;
+    fs::write(Path::new(dir).join("event_batch_v2.json"), packed_vector)
+        .map_err(|e| e.to_string())?;
     println!("wrote ML-DSA-65 vectors to {dir}");
     Ok(())
 }

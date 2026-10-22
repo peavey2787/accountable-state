@@ -10,7 +10,7 @@
 use crate::audit::store::RecordFile;
 use crate::audit::Status;
 use crate::export::{Commitment, ExportEvent};
-use gv_core::{MatchId, PlayerId};
+use gv_core::{MatchId, ParticipantId};
 use gv_sig::{verify, Signature, SigningKey, SIG_LEN};
 use std::io;
 use std::path::Path;
@@ -28,7 +28,7 @@ pub enum FeedError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedEvent {
-    pub publisher: PlayerId,
+    pub publisher: ParticipantId,
     pub match_id: MatchId,
     /// Persistent, strictly increasing, gap-free per publisher and match.
     pub id: u64,
@@ -99,7 +99,12 @@ fn event_from(b: &[u8]) -> Result<ExportEvent, FeedError> {
 }
 
 impl SignedEvent {
-    fn signed_body(publisher: &PlayerId, match_id: &MatchId, id: u64, e: &ExportEvent) -> Vec<u8> {
+    fn signed_body(
+        publisher: &ParticipantId,
+        match_id: &MatchId,
+        id: u64,
+        e: &ExportEvent,
+    ) -> Vec<u8> {
         let mut o = Vec::new();
         o.extend_from_slice(publisher);
         o.extend_from_slice(match_id);
@@ -148,7 +153,7 @@ impl SignedEvent {
             return Err(FeedError::Malformed);
         }
         let (head, sig) = r.split_at(r.len() - SIG_LEN);
-        let publisher: PlayerId = head[..32].try_into().map_err(|_| FeedError::Malformed)?;
+        let publisher: ParticipantId = head[..32].try_into().map_err(|_| FeedError::Malformed)?;
         let match_id: MatchId = head[32..64].try_into().map_err(|_| FeedError::Malformed)?;
         let id = u64::from_le_bytes(head[64..72].try_into().map_err(|_| FeedError::Malformed)?);
         let event = event_from(&head[72..])?;

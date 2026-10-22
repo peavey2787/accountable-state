@@ -1,258 +1,101 @@
-#![allow(clippy::needless_range_loop)]
+use super::netsim::{busy, config, held, net, net_with, reference, Net, MATCH};
 use super::*;
+use crate::audit::{ChallengeKind, Status};
+use crate::fixtures::{controls, Cast};
 use crate::testkit::{self as grid, GridRules, GridState};
-use crate::{apply_tick, MatchReplica, StateMachine};
-use gv_core::PlayerId;
-use gv_sig::SigningKey;
-use std::collections::VecDeque;
+use gv_core::Certification;
+use gv_replay::StateMachine;
 
-const MATCH: [u8; 32] = [7; 32];
-
-struct Peer {
-    pipe: Pipeline<GridRules>,
-    script: Vec<u16>,
-    events: Vec<(u64, PipeEvent)>,
-    sent: Vec<(u64, PipeMsg)>,
+fn ids(n: &Net) -> Vec<gv_core::ParticipantId> {
+    n.cast.keys.iter().map(|k| k.id()).collect()
 }
-type DropRule = Box<dyn Fn(usize, u64, &PipeMsg) -> bool>;
-struct Net {
-    peers: [Peer; 2],
-    wire: [VecDeque<(u64, Vec<u8>)>; 2], // wire[i] = messages travelling TO peer i
-    delay: u64,
-    now: u64,
-    /// Peer i's local tick is `now - skew[i]`: its clock runs a little behind.
-    skew: [u64; 2],
-    /// Drop predicate on (sender index, message).
-    drop: DropRule,
+fn scripts_of(n: &Net) -> Vec<Vec<u16>> {
+    n.peers.iter().map(|p| p.script.clone()).collect()
 }
-
-fn keys() -> [SigningKey; 2] {
-    [
-        SigningKey::from_seed([1; 32]),
-        SigningKey::from_seed([2; 32]),
-    ]
-}
-fn roster() -> [PlayerId; 2] {
-    let mut r = keys().map(|k| k.id());
-    r.sort();
-    r
-}
-
-fn net(scripts: [Vec<u16>; 2], cfg: PipelineConfig, delay: u64) -> Net {
-    let roster = roster();
-    let rules = GridRules::new(roster);
-    let mk = |i: usize, script: Vec<u16>| Peer {
-        pipe: {
-            let mut pipe = Pipeline::new(
-                keys()[i].clone(),
-                roster,
-                MATCH,
-                rules.clone(),
-                MatchReplica::new(MATCH, roster, rules.clone()).unwrap(),
-                cfg.clone(),
-            )
-            .unwrap();
-            pipe.auditor_mut().use_ephemeral_store_for_tests();
-            pipe
-        },
-        script,
-        events: Vec::new(),
-        sent: Vec::new(),
-    };
-    let [s0, s1] = scripts;
-    Net {
-        peers: [mk(0, s0), mk(1, s1)],
-        wire: [VecDeque::new(), VecDeque::new()],
-        delay,
-        now: 0,
-        skew: [0, 0],
-        drop: Box::new(|_, _, _| false),
-    }
-}
-
-impl Net {
-    fn run(&mut self, ticks: u64) {
-        for _ in 0..ticks {
-            self.now += 1;
-            for i in 0..2 {
-                let now = self.now.saturating_sub(self.skew[i]);
-                let script = self.peers[i].script.clone();
-                let own = move |from: u64, to: u64| -> Option<Vec<u16>> {
-                    (to <= now).then(|| {
-                        (from..to)
-                            .map(|k| script.get(k as usize).copied().unwrap_or(0))
-                            .collect()
-                    })
-                };
-                self.peers[i].pipe.tick(now, &own);
-                self.flush(i, now);
-                // deliver everything due to peer i
-                // Wire time is global; only the pipeline's own tick lags.
-                while self.wire[i].front().is_some_and(|(at, _)| *at <= self.now) {
-                    let (_, bytes) = self.wire[i].pop_front().unwrap();
-                    let msg = PipeMsg::decode(&bytes).expect("wire message decodes");
-                    self.peers[i].pipe.on_message(msg, now, &own);
-                    self.flush(i, now);
-                }
-            }
-        }
-    }
-    fn flush(&mut self, i: usize, now: u64) {
-        while let Some(m) = self.peers[i].pipe.poll_outbox() {
-            if !(self.drop)(i, now, &m) {
-                let bytes = m.encode().expect("encodes");
-                let _ = now;
-                self.wire[1 - i].push_back((self.now + self.delay, bytes));
-            }
-            self.peers[i].sent.push((now, m));
-        }
-        while let Some(e) = self.peers[i].pipe.poll_event() {
-            self.peers[i].events.push((now, e));
-        }
-    }
-    fn violations(&self, i: usize) -> Vec<&Violation> {
-        self.peers[i]
-            .events
-            .iter()
-            .filter_map(|(_, e)| {
-                if let PipeEvent::Violation(v) = e {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-    fn finalized(&self, i: usize) -> Vec<(u64, u64, bool)> {
-        self.peers[i]
-            .events
-            .iter()
-            .filter_map(|(_, e)| match e {
-                PipeEvent::Finalized {
-                    start,
-                    end,
-                    disputed,
-                    ..
-                } => Some((*start, *end, *disputed)),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-fn reference(scripts: &[Vec<u16>; 2], ticks: u64) -> Vec<u8> {
-    let roster = roster();
-    let rules = GridRules::new(roster);
-    let mut state = rules.genesis(&roster);
-    let ctl = |p: usize, t: u64| {
-        let key = keys()[p].id();
-        let idx = roster.iter().position(|r| *r == key).unwrap();
-        let _ = idx;
-        scripts[p].get(t as usize).copied().unwrap_or(0)
-    };
-    for t in 0..ticks {
-        for (slot, id) in roster.iter().enumerate() {
-            let p = keys().iter().position(|k| k.id() == *id).unwrap();
-            let _ = slot;
-            state = apply_tick(&rules, &state, id, t, ctl(p, t), true)
-                .unwrap()
-                .0;
-        }
-    }
-    state
-}
-
-fn held(c: u16, from: usize, to: usize, len: usize) -> Vec<u16> {
-    let mut v = vec![0; len];
-    for x in &mut v[from..to] {
-        *x = c;
-    }
-    v
-}
-
-#[test]
-fn nobody_sends_anything_while_both_players_are_idle() {
-    let mut n = net([vec![], vec![]], PipelineConfig::default(), 2);
-    n.run(1200);
-    assert!(
-        n.peers[0].sent.is_empty() && n.peers[1].sent.is_empty(),
-        "idle = silent"
+fn assert_matches_reference(n: &Net, peer: usize) {
+    let t = n.peers[peer].pipe.verified_tick();
+    assert_eq!(
+        n.peers[peer].pipe.verified_state(),
+        reference(&n.cast, &scripts_of(n), t).as_slice(),
+        "peer {peer} at tick {t}"
     );
-    assert_eq!(n.peers[0].pipe.verified_tick(), 0);
+}
+fn sent_count(n: &Net) -> usize {
+    n.peers.iter().map(|p| p.sent.len()).sum()
+}
+fn sealed_config() -> PipelineConfig {
+    let mut cfg = config();
+    cfg.seal = Some(SealPolicy::default());
+    cfg
 }
 
 #[test]
-fn one_active_player_proposes_the_idle_one_answers_and_both_certify() {
-    let scripts = [held(grid::UP, 5, 9, 200), vec![]];
-    let mut n = net(scripts.clone(), PipelineConfig::default(), 3);
+fn nobody_sends_anything_while_everyone_is_idle() {
+    for peers in [2usize, 3, 4] {
+        let mut n = net(vec![vec![]; peers], config(), 2);
+        n.run(1200);
+        assert!(n.peers.iter().all(|p| p.sent.is_empty()), "idle = silent");
+        assert_eq!(n.peers[0].pipe.verified_tick(), 0);
+    }
+}
+
+#[test]
+fn one_active_player_proposes_the_idle_ones_answer_and_everyone_certifies() {
+    let scripts = vec![held(grid::UP, 5, 9, 200), vec![], vec![]];
+    let mut n = net(scripts, config(), 3);
     n.run(200);
-    let (a, b) = (n.finalized(0), n.finalized(1));
+    let a = n.finalized(0);
     assert!(!a.is_empty(), "an epoch was certified");
-    assert_eq!(a, b, "both certified identical epochs");
+    assert!(n.agree(&[0, 1, 2]), "all certified identical epochs");
     assert_eq!(a[0], (0, 20, false), "first epoch ends on the 20-tick grid");
-    assert_eq!(
-        n.peers[0].pipe.verified_state(),
-        n.peers[1].pipe.verified_state()
-    );
-    let t = n.peers[0].pipe.verified_tick();
-    assert_eq!(
-        n.peers[0].pipe.verified_state(),
-        reference(&scripts, t).as_slice()
-    );
-    // The idle player only ever answered; it never opened an epoch of its own.
-    let b_batches = n.peers[1]
+    assert_matches_reference(&n, 0);
+    // An idle player only ever answers once; it never opens an epoch of its own.
+    let batches = n.peers[1]
         .sent
         .iter()
-        .filter(|(_, m)| matches!(m, PipeMsg::Batch(_)))
+        .filter(|(_, o)| matches!(o.msg, PipeMsg::Batch(_)))
         .count();
-    assert_eq!(b_batches, 1);
+    assert_eq!(batches, 1);
     // Once certified, nothing more is exchanged.
-    let sent_before = n.peers[0].sent.len() + n.peers[1].sent.len();
+    let before = sent_count(&n);
     n.run(600);
-    assert_eq!(n.peers[0].sent.len() + n.peers[1].sent.len(), sent_before);
+    assert_eq!(sent_count(&n), before);
 }
 
 #[test]
-fn both_active_at_different_times_agree_on_the_shorter_epoch() {
-    // A acts in cell 2 (ticks 40-59); B acts in cell 1 (ticks 20-39).
-    let scripts = [
+fn players_active_at_different_times_agree_on_the_shortest_epoch() {
+    let scripts = vec![
         held(grid::RIGHT, 45, 50, 300),
         held(grid::LEFT, 22, 26, 300),
+        held(grid::UP, 70, 75, 300),
     ];
     for delay in [0, 1, 5, 12, 25] {
-        let mut n = net(scripts.clone(), PipelineConfig::default(), delay);
-        n.run(300);
-        assert_eq!(n.finalized(0), n.finalized(1), "delay {delay}");
+        let mut n = net(scripts.clone(), config(), delay);
+        n.run(300 + 6 * delay);
+        assert!(n.agree(&[0, 1, 2]), "delay {delay}");
         assert!(
             n.finalized(0).len() >= 2,
             "delay {delay}: {:?}",
             n.finalized(0)
         );
-        assert_eq!(
-            n.peers[0].pipe.verified_state(),
-            n.peers[1].pipe.verified_state()
-        );
-        let t = n.peers[0].pipe.verified_tick();
-        assert_eq!(
-            n.peers[0].pipe.verified_state(),
-            reference(&scripts, t).as_slice(),
-            "delay {delay}"
-        );
-        assert!(
-            n.violations(0).is_empty() && n.violations(1).is_empty(),
-            "delay {delay}"
-        );
+        assert_matches_reference(&n, 0);
+        assert!((0..3).all(|i| n.violations(i).is_empty()), "delay {delay}");
     }
 }
 
 #[test]
-fn a_false_signed_checkpoint_is_proven_on_both_sides_and_play_continues() {
-    let scripts = [held(grid::UP, 3, 60, 300), held(grid::DOWN, 10, 40, 300)];
-    let mut n = net(scripts.clone(), PipelineConfig::default(), 2);
+fn a_false_checkpoint_is_proven_by_every_honest_peer_and_play_continues() {
+    let scripts = vec![
+        held(grid::UP, 3, 60, 300),
+        held(grid::DOWN, 10, 40, 300),
+        held(grid::LEFT, 20, 50, 300),
+    ];
+    let mut n = net(scripts, config(), 2);
     n.run(10);
     n.peers[1].pipe.inject_cheat();
     n.run(290);
-    for i in 0..2 {
+    let liar = ids(&n)[1];
+    for i in 0..3 {
         let v = n.violations(i);
         assert_eq!(
             v.len(),
@@ -261,27 +104,63 @@ fn a_false_signed_checkpoint_is_proven_on_both_sides_and_play_continues() {
             v.iter().map(|x| x.kind).collect::<Vec<_>>()
         );
         assert_eq!(v[0].kind, ViolationKind::FalseCheckpoint);
-        assert_eq!(v[0].accused, keys()[1].id());
+        assert_eq!(v[0].accused, liar);
         assert!(!v[0].evidence.is_empty());
     }
-    assert_eq!(n.finalized(0), n.finalized(1));
+    assert!(n.agree(&[0, 1, 2]));
     assert!(
         n.finalized(0).iter().any(|e| e.2),
-        "the disputed epoch closed by evidence"
+        "unanimous certification became unreachable: closed by evidence"
     );
     assert!(
         n.finalized(0).iter().filter(|e| !e.2).count() >= 2,
-        "play continued and re-agreed"
+        "play re-agreed"
     );
-    assert_eq!(
-        n.peers[0].pipe.verified_state(),
-        n.peers[1].pipe.verified_state()
+    assert_matches_reference(&n, 0);
+}
+
+#[test]
+fn a_threshold_session_certifies_past_a_proven_liar_without_a_dispute() {
+    let cast = Cast::with_policy(4, MATCH, Certification::Threshold { min: 3 });
+    let scripts = vec![
+        held(grid::UP, 3, 60, 300),
+        held(grid::DOWN, 10, 40, 300),
+        held(grid::LEFT, 20, 50, 300),
+        held(grid::RIGHT, 5, 30, 300),
+    ];
+    let mut n = net_with(cast, scripts, config(), 2);
+    n.run(10);
+    n.peers[2].pipe.inject_cheat();
+    n.run(290);
+    let liar = ids(&n)[2];
+    for i in [0, 1, 3] {
+        let v = n.violations(i);
+        assert!(v
+            .iter()
+            .all(|x| x.accused == liar && x.kind == ViolationKind::FalseCheckpoint));
+        assert!(v.len() <= 1, "peer {i}");
+    }
+    let proofs: usize = [0, 1, 3].iter().map(|&i| n.violations(i).len()).sum();
+    assert!(
+        proofs >= 1,
+        "the late, false claim is proven by whoever still judges it"
     );
-    let t = n.peers[0].pipe.verified_tick();
-    assert_eq!(
-        n.peers[0].pipe.verified_state(),
-        reference(&scripts, t).as_slice()
+    assert!(n.agree(&[0, 1, 3]));
+    assert!(
+        n.finalized(0).iter().all(|e| !e.2),
+        "three honest signers met the policy"
     );
+    assert_matches_reference(&n, 0);
+}
+
+#[test]
+fn a_false_accusation_of_a_false_checkpoint_needs_replay_proof() {
+    // An honest checkpoint is never judged false: nobody cheats, nothing is reported.
+    let scripts = vec![busy(3, 400), busy(4, 400), busy(5, 400)];
+    let mut n = net(scripts, config(), 3);
+    n.run(400);
+    assert!((0..3).all(|i| n.violations(i).is_empty()));
+    assert!(n.agree(&[0, 1, 2]));
 }
 
 #[test]
@@ -291,109 +170,74 @@ fn a_signed_illegal_input_is_neutralized_proven_and_does_not_stall() {
         *x = 128; // unsupported control word
     }
     a[30] = grid::LEFT | grid::RIGHT; // contradictory
-    let scripts = [a, held(grid::DOWN, 4, 8, 200)];
-    let mut n = net(scripts.clone(), PipelineConfig::default(), 2);
+    let scripts = vec![a, held(grid::DOWN, 4, 8, 200), held(grid::UP, 6, 9, 200)];
+    let mut n = net(scripts, config(), 2);
     n.run(200);
-    for i in 0..2 {
+    let cheater = ids(&n)[0];
+    for i in 0..3 {
         let v = n.violations(i);
         assert!(!v.is_empty(), "peer {i} saw the violation");
-        assert!(v.iter().all(|x| x.kind == ViolationKind::IllegalInput));
-        assert!(v.iter().all(|x| x.accused == keys()[0].id()));
+        assert!(v
+            .iter()
+            .all(|x| x.kind == ViolationKind::IllegalInput && x.accused == cheater));
     }
     assert_eq!(n.violations(0).len(), n.violations(1).len());
-    assert_eq!(n.finalized(0), n.finalized(1));
+    assert!(n.agree(&[0, 1, 2]));
     assert!(
         n.finalized(0).iter().all(|e| !e.2),
-        "no dispute: both replayed the same sanitized epoch"
+        "both replayed the same sanitized epoch"
     );
-    let t = n.peers[0].pipe.verified_tick();
-    assert!(t >= 40);
-    assert_eq!(
-        n.peers[0].pipe.verified_state(),
-        reference(&scripts, t).as_slice()
-    );
-    // The evidence is a portable, independently checkable artifact.
+    assert!(n.peers[0].pipe.verified_tick() >= 40);
+    assert_matches_reference(&n, 0);
+    // The evidence is portable and checkable by a third party.
     let ev = crate::CheckpointEvidence::decode(&n.violations(1)[0].evidence).unwrap();
     assert_eq!(
-        crate::verify_checkpoint_evidence_with(&GridRules::new(roster()), &ev, true),
+        crate::verify_checkpoint_evidence_with(&GridRules, &ev, true),
         crate::EvidenceVerdict::ValidClaim
     );
-    // ... and exports as a self-verifying package that a third party checks with pinned facts only.
-    {
-        use crate::export::*;
-        use gv_replay::StateMachine as _;
-        let rules = GridRules::new(roster());
-        let anchor = TrustAnchor {
-            match_id: ev.accused.claim.match_id,
-            ruleset: rules.ruleset_hash(),
-            roster: roster(),
-        };
-        let pkg = export_fraud(
-            &rules,
-            anchor.match_id,
-            roster(),
-            FraudWitness::IllegalInput(&ev),
-            DisclosurePolicy::PUBLIC,
-        )
-        .unwrap();
-        let bytes = pkg.encode().unwrap();
-        let (_, v) = verify_package(&bytes, &anchor, &rules).unwrap();
-        assert_eq!(
-            v,
-            Verified::Fraud {
-                kind: FraudKind::IllegalInput,
-                accused: keys()[0].id()
-            }
-        );
-        let mut bad = bytes.clone();
-        let mid = bad.len() / 2;
-        bad[mid] ^= 1;
-        assert!(verify_package(&bad, &anchor, &rules).is_err());
-    }
-}
-
-fn busy(seed: u64, ticks: usize) -> Vec<u16> {
-    let mut s = seed | 1;
-    let pool = [
-        0,
-        grid::LEFT,
-        grid::RIGHT,
-        grid::UP,
-        grid::DOWN,
-        grid::ACT,
-        grid::HOLD,
-        0,
-        0,
-    ];
-    let mut out = Vec::new();
-    while out.len() < ticks {
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        let c = pool[(s % pool.len() as u64) as usize];
-        for _ in 0..1 + (s >> 20) % 12 {
-            out.push(c);
+    // It exports as a self-verifying package checked with pinned facts only.
+    use crate::export::*;
+    let session = &n.cast.session;
+    let anchor = TrustAnchor {
+        match_id: MATCH,
+        ruleset: GridRules.ruleset_hash(),
+        session: session.digest(),
+    };
+    let pkg = export_fraud(
+        &GridRules,
+        session,
+        FraudWitness::IllegalInput(&ev),
+        DisclosurePolicy::PUBLIC,
+    )
+    .unwrap();
+    let bytes = pkg.encode().unwrap();
+    let (_, v) = verify_package(&bytes, &anchor, &GridRules).unwrap();
+    assert_eq!(
+        v,
+        Verified::Fraud {
+            kind: FraudKind::IllegalInput,
+            accused: cheater
         }
-    }
-    out.truncate(ticks);
-    out
+    );
+    let mut bad = bytes.clone();
+    let mid = bad.len() / 2;
+    bad[mid] ^= 1;
+    assert!(verify_package(&bad, &anchor, &GridRules).is_err());
 }
 
 #[test]
-fn hidden_window_uses_commit_lock_reveal_and_leaks_nothing_until_the_end() {
-    // Both players go quiet at tick 1000 so the network drains before we compare.
-    let scripts = [busy(11, 1000), busy(23, 1000)];
+fn a_sealed_window_commits_locks_and_reveals_and_leaks_nothing_until_the_end() {
+    let scripts = vec![busy(11, 1000), busy(23, 1000), busy(31, 1000)];
     for delay in [0, 3, 9] {
-        let mut n = net(scripts.clone(), PipelineConfig::default(), delay);
+        let mut n = net(scripts.clone(), sealed_config(), delay);
         n.run(100);
-        n.peers[0].pipe.request_hide(100).unwrap();
+        n.peers[0].pipe.request_seal(100).unwrap();
         let (h0, h1) = (140u64, 440u64);
         n.run(1000);
-        let hider = keys()[0].id();
-        // 1. The hider never put a plaintext batch or reveal on the wire for
-        //    the hidden ticks before the window closed.
-        for (at, m) in &n.peers[0].sent {
-            match m {
+        let owner = ids(&n)[0];
+        // 1. No plaintext batch or reveal for the sealed ticks reached the wire before the end.
+        for (at, o) in &n.peers[0].sent {
+            match &o.msg {
                 PipeMsg::Batch(b) => {
                     let (s, e) = (
                         b.record.start_tick,
@@ -406,193 +250,179 @@ fn hidden_window_uses_commit_lock_reveal_and_leaks_nothing_until_the_end() {
                 }
                 PipeMsg::Reveal(b) => assert!(
                     *at >= h1,
-                    "delay {delay}: early reveal at {at} of {}",
+                    "delay {delay}: early reveal at {at}: {}",
                     b.batch.record.start_tick
                 ),
                 _ => {}
             }
         }
-        // 2. Commitments and locks did flow during the window.
+        // 2. Commitments and locks flowed during the window.
         let commits = n.peers[0]
             .sent
             .iter()
-            .filter(|(at, m)| matches!(m, PipeMsg::Commit(_)) && *at < h1)
+            .filter(|(at, o)| matches!(o.msg, PipeMsg::Commit(_)) && *at < h1)
             .count();
         assert!(
             commits >= 10,
-            "delay {delay}: hider committed progressively: {commits}"
+            "delay {delay}: progressive commitments: {commits}"
         );
         assert!(n.peers[0]
             .sent
             .iter()
-            .any(|(_, m)| matches!(m, PipeMsg::Lock(_))));
-        // 3. The observer learned nothing about the hidden inputs before h1.
-        for (at, e) in &n.peers[1].events {
-            if let PipeEvent::RemoteInputs { from_tick, .. } = e {
-                assert!(
-                    !(*from_tick >= h0 && *from_tick < h1) || *at >= h1,
-                    "delay {delay}: leaked tick {from_tick} at {at}"
-                );
+            .any(|(_, o)| matches!(o.msg, PipeMsg::Lock { .. })));
+        // 3. Observers learned nothing about the sealed inputs before the end.
+        for obs in [1, 2] {
+            for (at, e) in &n.peers[obs].events {
+                if let PipeEvent::RemoteInputs {
+                    participant,
+                    from_tick,
+                    ..
+                } = e
+                {
+                    let sealed = participant == &owner && (h0..h1).contains(from_tick);
+                    assert!(
+                        !sealed || *at >= h1,
+                        "delay {delay}: leaked tick {from_tick} at {at}"
+                    );
+                }
             }
         }
-        // 4. After the reveal everything certifies and both agree with the replay.
-        for i in 0..2 {
+        // 4. After the reveal everything certifies and matches the replay.
+        for i in 0..3 {
+            let seen = |f: fn(&PipeEvent) -> bool| n.peers[i].events.iter().any(|(_, e)| f(e));
             assert!(
-                n.peers[i].events.iter().any(
-                    |(_, e)| matches!(e, PipeEvent::HideScheduled { hider: h, .. } if *h == hider)
-                ),
+                seen(|e| matches!(e, PipeEvent::SealScheduled { .. })),
                 "delay {delay}"
             );
             assert!(
-                n.peers[i]
-                    .events
-                    .iter()
-                    .any(|(_, e)| matches!(e, PipeEvent::HideRevealed { .. })),
+                seen(|e| matches!(e, PipeEvent::SealRevealed { .. })),
                 "delay {delay} peer {i}"
             );
-            assert!(
-                n.violations(i).is_empty(),
-                "delay {delay} peer {i}: {:?}",
-                n.violations(i).iter().map(|v| v.kind).collect::<Vec<_>>()
-            );
+            assert!(n.violations(i).is_empty(), "delay {delay} peer {i}");
         }
-        assert_eq!(n.finalized(0), n.finalized(1), "delay {delay}");
-        assert!(n.peers[0].pipe.verified_tick() >= h1, "delay {delay}");
-        assert_eq!(
-            n.peers[0].pipe.verified_state(),
-            n.peers[1].pipe.verified_state()
-        );
-        let t = n.peers[0].pipe.verified_tick();
-        assert_eq!(
-            n.peers[0].pipe.verified_state(),
-            reference(&scripts, t).as_slice(),
-            "delay {delay}"
-        );
+        assert!(n.agree(&[0, 1, 2]), "delay {delay}");
+        assert!(n.peers[0].pipe.verified_tick() >= h1);
+        assert_matches_reference(&n, 0);
         assert!(GridState::decode(n.peers[0].pipe.verified_state()).is_ok());
-        // 5. Cooldown, then a second hide is allowed.
-        assert!(
-            matches!(
-                n.peers[0].pipe.request_hide(500),
-                Err(HideError::Cooldown { .. })
-            ),
-            "cooldown after a hide"
-        );
-        let after = n.peers[0].pipe.hide_cooldown_until();
+        // 5. Cooldown, then a second window is allowed.
+        assert!(matches!(
+            n.peers[0].pipe.request_seal(500),
+            Err(SealError::Cooldown { .. })
+        ));
+        let after = n.peers[0].pipe.seal_cooldown_until();
         n.peers[0]
             .pipe
-            .request_hide(after)
+            .request_seal(after)
             .expect("allowed again after the cooldown");
     }
 }
 
 #[test]
-fn a_withheld_reveal_is_reported_and_stalls_only_the_certified_chain() {
-    let scripts = [busy(5, 1900), busy(6, 1900)];
-    let mut n = net(scripts, PipelineConfig::default(), 2);
-    n.drop = Box::new(|from, _, m| from == 0 && matches!(m, PipeMsg::Reveal(_)));
-    n.run(100);
-    n.peers[0].pipe.request_hide(100).unwrap();
-    n.run(1800);
-    let hider = keys()[0].id();
-    let v = n.violations(1);
-    assert!(
-        v.iter()
-            .any(|x| x.kind == ViolationKind::WithheldReveal && x.accused == hider),
-        "{:?}",
-        v.iter().map(|x| x.kind).collect::<Vec<_>>()
-    );
-    assert!(
-        n.peers[1].pipe.verified_tick() <= 140,
-        "the hidden epochs cannot be certified without a reveal"
-    );
+fn sealed_windows_are_refused_without_a_policy_and_by_non_submitters() {
+    let mut n = net(vec![vec![], vec![]], config(), 1);
+    assert_eq!(n.peers[0].pipe.request_seal(0), Err(SealError::Disabled));
+    let seal = {
+        let mut sealed = net(vec![vec![], vec![]], sealed_config(), 1);
+        sealed.peers[0].pipe.request_seal(0).unwrap();
+        sealed.peers[0].pipe.poll_outbox().unwrap().msg
+    };
+    // A peer without a policy rejects the announcement instead of opening a window.
+    n.inject(1, 0, seal);
+    assert!(n.peers[1].pipe.seal_window().is_none());
 }
 
 #[test]
-fn a_reveal_that_does_not_match_its_commitment_is_rejected() {
-    let scripts = [busy(8, 1000), busy(9, 1000)];
-    let mut n = net(scripts, PipelineConfig::default(), 2);
+fn a_withheld_reveal_is_only_a_suspicion_and_stalls_only_the_certified_chain() {
+    let scripts = vec![busy(5, 1900), busy(6, 1900), busy(7, 1900)];
+    let mut n = net(scripts, sealed_config(), 2);
+    n.drop = Box::new(|from, _, o| from == 0 && matches!(o.msg, PipeMsg::Reveal(_)));
     n.run(100);
-    n.peers[0].pipe.request_hide(100).unwrap();
-    // Corrupt every reveal the hider sends: re-sign different inputs.
-    let key = keys()[0].clone();
-    n.drop = Box::new(|from, _, m| from == 0 && matches!(m, PipeMsg::Reveal(_)));
+    n.peers[0].pipe.request_seal(100).unwrap();
+    n.run(1800);
+    let owner = ids(&n)[0];
+    for obs in [1, 2] {
+        let suspected = n.peers[obs].events.iter().any(|(_, e)| {
+            matches!(e, PipeEvent::Suspicion(s) if s.kind == SuspicionKind::WithheldReveal && s.subject == owner)
+        });
+        assert!(suspected, "peer {obs}");
+        assert!(n.violations(obs).is_empty(), "withholding is never proof");
+        assert!(
+            n.peers[obs].pipe.verified_tick() <= 140,
+            "sealed epochs cannot certify without a reveal"
+        );
+    }
+}
+
+#[test]
+fn a_reveal_that_does_not_match_its_commitment_is_a_suspicion_not_proof() {
+    use gv_codec::{EventBody, HeldChange, SignedEventBatch};
+    let scripts = vec![busy(8, 1000), busy(9, 1000), busy(10, 1000)];
+    let mut n = net(scripts, sealed_config(), 2);
+    n.run(100);
+    n.peers[0].pipe.request_seal(100).unwrap();
+    n.drop = Box::new(|from, _, o| from == 0 && matches!(o.msg, PipeMsg::Reveal(_)));
     n.run(500);
-    let mut forged = 0;
     let reveals: Vec<_> = n.peers[0]
         .sent
         .iter()
-        .filter_map(|(_, m)| {
-            if let PipeMsg::Reveal(b) = m {
-                Some(b.clone())
-            } else {
-                None
-            }
+        .filter_map(|(_, o)| match &o.msg {
+            PipeMsg::Reveal(b) => Some(b.clone()),
+            _ => None,
         })
         .collect();
+    assert!(!reveals.is_empty());
+    let key = n.cast.keys[0].clone();
     for b in reveals {
         let mut rec = b.batch.record.clone();
-        rec.initial_state ^= grid::ACT;
-        rec.changes.clear();
-        let lie = gv_codec::SignedPackedControls::sign(rec, &key).unwrap();
-        let now = n.now;
-        let script = n.peers[1].script.clone();
-        let own = move |f: u64, t: u64| {
-            (t <= now).then(|| {
-                (f..t)
-                    .map(|k| script.get(k as usize).copied().unwrap_or(0))
-                    .collect()
-            })
+        rec.body = EventBody::Held {
+            initial: controls(grid::ACT),
+            changes: Vec::<HeldChange>::new(),
         };
-        n.peers[1].pipe.on_message(
-            PipeMsg::Reveal(crate::live::Opening {
+        let lie = SignedEventBatch::sign(rec, &key).unwrap();
+        n.inject(
+            1,
+            0,
+            PipeMsg::Reveal(Opening {
                 batch: lie,
                 blind: b.blind,
             }),
-            now,
-            &own,
         );
-        forged += 1;
     }
-    while let Some(e) = n.peers[1].pipe.poll_event() {
-        n.peers[1].events.push((n.now, e));
-    }
-    assert!(forged > 0);
+    n.run(1);
+    let bad = n.peers[1]
+        .events
+        .iter()
+        .any(|(_, e)| matches!(e, PipeEvent::Suspicion(s) if s.kind == SuspicionKind::BadReveal));
+    assert!(bad);
     assert!(
-        n.violations(1)
-            .iter()
-            .any(|v| v.kind == ViolationKind::BadReveal),
-        "{:?}",
-        n.violations(1).iter().map(|v| v.kind).collect::<Vec<_>>()
+        n.violations(1).is_empty(),
+        "an unauthenticated blind proves nothing"
     );
 }
 
 #[test]
-fn a_responder_whose_clock_lags_still_pairs_without_waiting_for_more_traffic() {
-    // Regression: the lagging peer answers an "owed" proposal later, and that
-    // answer alone must complete the pair. Previously it waited for unrelated
-    // traffic, so one illegal-input tap stalled certification indefinitely.
-    let scripts = [held(grid::RIGHT, 45, 50, 400), vec![]];
+fn a_lagging_responder_still_pairs_without_waiting_for_more_traffic() {
+    let scripts = vec![held(grid::RIGHT, 45, 50, 400), vec![], vec![]];
     for skew in 1..=9u64 {
         for delay in [0, 2, 7] {
-            let mut n = net(scripts.clone(), PipelineConfig::default(), delay);
-            n.skew = [0, skew];
+            let mut n = net(scripts.clone(), config(), delay);
+            n.skew = vec![0, skew, skew / 2];
             n.run(260);
             assert!(
                 !n.finalized(0).is_empty(),
                 "skew {skew} delay {delay}: nothing certified"
             );
-            assert_eq!(n.finalized(0), n.finalized(1), "skew {skew} delay {delay}");
+            assert!(n.agree(&[0, 1, 2]), "skew {skew} delay {delay}");
         }
     }
-    // Both lagging in either direction, both active, with an illegal word too.
     let mut a = held(grid::UP, 3, 9, 400);
     a[100] = 128;
-    let scripts = [a, held(grid::LEFT, 4, 7, 400)];
-    for skew in [[0, 3], [3, 0], [2, 5]] {
-        let mut n = net(scripts.clone(), PipelineConfig::default(), 4);
-        n.skew = skew;
+    let scripts = vec![a, held(grid::LEFT, 4, 7, 400), held(grid::DOWN, 5, 8, 400)];
+    for skew in [[0, 3, 0], [3, 0, 1], [2, 5, 4]] {
+        let mut n = net(scripts.clone(), config(), 4);
+        n.skew = skew.to_vec();
         n.run(400);
-        assert_eq!(n.finalized(0), n.finalized(1), "skew {skew:?}");
+        assert!(n.agree(&[0, 1, 2]), "skew {skew:?}");
         assert!(
             n.finalized(0).len() >= 2,
             "skew {skew:?}: {:?}",
@@ -606,44 +436,58 @@ fn a_responder_whose_clock_lags_still_pairs_without_waiting_for_more_traffic() {
     }
 }
 
+#[test]
+fn a_silent_member_is_closed_out_by_the_rotating_coordinator() {
+    let cast = Cast::with_policy(4, MATCH, Certification::Threshold { min: 3 });
+    let mut cfg = config();
+    cfg.close_after_ticks = Some(60);
+    let scripts = vec![busy(1, 600), busy(2, 600), busy(3, 600), busy(4, 600)];
+    let mut n = net_with(cast, scripts, cfg, 2);
+    n.offline[3] = true;
+    n.run(600);
+    assert!(n.agree(&[0, 1, 2]));
+    assert!(
+        n.peers[0].pipe.verified_tick() >= 100,
+        "play went on without the silent member"
+    );
+    let silent = ids(&n)[3];
+    let suspected = n.peers[0].events.iter().any(|(_, e)| {
+        matches!(e, PipeEvent::Suspicion(s) if s.kind == SuspicionKind::Unresponsive && s.subject == silent)
+    });
+    assert!(suspected, "silence is a suspicion");
+    assert!(n.violations(0).is_empty(), "never a conclusive verdict");
+}
+
 // ---- accountability (PeerReview-style) ------------------------------------
 
-fn audit_events(n: &Net, i: usize) -> Vec<&AuditEvent> {
+fn statuses(n: &Net, i: usize) -> Vec<Status> {
     n.peers[i]
         .events
         .iter()
         .filter_map(|(_, e)| match e {
-            PipeEvent::Audit(a) => Some(a),
+            PipeEvent::Audit(AuditEvent::Challenge { status, .. }) => Some(*status),
             _ => None,
         })
         .collect()
 }
-fn statuses(n: &Net, i: usize) -> Vec<crate::audit::Status> {
-    audit_events(n, i)
-        .into_iter()
-        .filter_map(|a| match a {
-            AuditEvent::Challenge { status, .. } => Some(*status),
-            _ => None,
-        })
-        .collect()
-}
-fn busy_pair() -> [Vec<u16>; 2] {
-    [
+fn busy_trio() -> Vec<Vec<u16>> {
+    vec![
         held(grid::UP, 0, 3000, 3000),
         held(grid::LEFT, 0, 3000, 3000),
+        held(grid::DOWN, 0, 3000, 3000),
     ]
 }
 
 #[test]
 fn a_dishonest_peer_showing_two_histories_is_proven_offline() {
-    let mut n = net(busy_pair(), PipelineConfig::default(), 2);
+    let mut n = net(busy_trio(), config(), 2);
     n.run(120);
     n.peers[0]
         .pipe
         .auditor_mut()
         .equivocate_next_authenticator();
     n.run(400);
-    // The victim holds exportable proof, and it verifies from bytes alone.
+    let cheat = ids(&n)[0];
     let proofs: Vec<_> = n
         .violations(1)
         .into_iter()
@@ -656,131 +500,135 @@ fn a_dishonest_peer_showing_two_histories_is_proven_offline() {
             ev.verify().unwrap(),
             crate::audit::Proof::Equivocation(v.accused)
         );
+        assert_eq!(v.accused, cheat);
     }
-    assert_eq!(proofs[0].accused, keys()[0].id());
-    // The proof is relayed to the accused's own ledger too (propagation), but the
-    // honest peer is never accused of anything.
-    assert!(n.violations(0).iter().all(|v| v.accused != keys()[1].id()));
-    assert!(n.violations(1).iter().all(|v| v.accused != keys()[1].id()));
-    // Play never stopped: both sides kept certifying.
-    assert!(n.finalized(0).len() > 10 && n.finalized(0) == n.finalized(1));
+    for i in 0..3 {
+        assert!(
+            n.violations(i).iter().all(|v| v.accused == cheat),
+            "only the cheat is accused"
+        );
+    }
+    assert!(
+        n.finalized(1).len() > 10 && n.agree(&[0, 1, 2]),
+        "play never stopped"
+    );
 }
 
 #[test]
 fn withholding_is_only_suspicion_and_a_late_answer_clears_it() {
-    use crate::audit::{ChallengeKind, Status};
-    let mut n = net(busy_pair(), PipelineConfig::default(), 2);
+    let mut n = net(busy_trio(), config(), 2);
     n.run(100);
     n.peers[0]
         .pipe
         .auditor_mut()
         .withhold_answers_until(100 + 700);
-    let now = n.now;
+    let (now, target) = (n.now, ids(&n)[0]);
     n.peers[1]
         .pipe
         .auditor_mut()
-        .challenge(ChallengeKind::Ack { seq: 1 }, now)
+        .challenge(target, ChallengeKind::Ack { seq: 1 }, now)
         .unwrap();
     n.run(1200);
     let s = statuses(&n, 1);
     assert!(s.contains(&Status::SuspectedNonCooperation), "{s:?}");
     assert_eq!(s.last(), Some(&Status::Cleared), "{s:?}");
-    // Delay is never a cheating verdict.
-    assert!(n.violations(0).is_empty() && n.violations(1).is_empty());
+    assert!(
+        (0..3).all(|i| n.violations(i).is_empty()),
+        "delay is never a cheating verdict"
+    );
     assert_eq!(n.peers[1].pipe.auditor().stats().pending, 0);
 }
 
 #[test]
 fn a_false_accusation_and_forged_evidence_prove_nothing() {
-    let mut n = net(busy_pair(), PipelineConfig::default(), 2);
+    let mut n = net(busy_trio(), config(), 2);
     n.run(200);
     let victim = n.peers[1]
         .sent
         .iter()
-        .find_map(|(_, m)| match m {
+        .find_map(|(_, o)| match &o.msg {
             PipeMsg::Checkpoint(c) => Some(c.clone()),
             _ => None,
         })
         .unwrap();
-    let now = n.now;
-    // Peer 0 frames peer 1 with a forged checkpoint pair and claims a missing batch
-    // that was in fact delivered.
+    let (now, framed) = (n.now, ids(&n)[1]);
     n.peers[0]
         .pipe
         .auditor_mut()
         .send_forged_accusation(&victim);
-    n.peers[0].pipe.auditor_mut().accuse_missing_batch(0, now);
+    n.peers[0]
+        .pipe
+        .auditor_mut()
+        .accuse_missing_batch(framed, 0, now);
     n.run(300);
     assert!(n.violations(1).is_empty(), "honest peer not framed");
     assert!(n.peers[1].pipe.auditor().stats().rejected_evidence >= 1);
-    // The accused answers the accusation with the signed batch: counterproof.
-    assert!(statuses(&n, 0).contains(&crate::audit::Status::Cleared));
-    assert!(!statuses(&n, 0).contains(&crate::audit::Status::SuspectedNonCooperation));
+    assert!(
+        statuses(&n, 0).contains(&Status::Cleared),
+        "the accused answers with the signed batch"
+    );
+    assert!(!statuses(&n, 0).contains(&Status::SuspectedNonCooperation));
 }
 
 #[test]
-fn a_lossy_reordering_network_never_produces_a_cheating_verdict() {
+fn a_lossy_network_never_produces_a_cheating_verdict() {
     for seed in 0u64..4 {
-        let mut n = net(busy_pair(), PipelineConfig::default(), 3);
-        // Drop accountability traffic pseudo-randomly; reliable layer still carries play.
-        n.drop = Box::new(move |from, now, m| {
+        let mut n = net(busy_trio(), config(), 3);
+        n.drop = Box::new(move |from, now, o| {
             matches!(
-                m,
+                o.msg,
                 PipeMsg::Auth(_) | PipeMsg::Challenge(_) | PipeMsg::Response(_)
-            ) && (now
+            ) && now
                 .wrapping_mul(2654435761)
-                .wrapping_add(seed * 7 + from as u64))
+                .wrapping_add(seed * 7 + from as u64)
                 % 3
                 == 0
         });
         n.run(1500);
-        assert!(
-            n.violations(0).is_empty(),
-            "seed {seed}: {:?}",
-            n.violations(0)
-        );
-        assert!(n.violations(1).is_empty(), "seed {seed}");
+        for i in 0..3 {
+            assert!(n.violations(i).is_empty(), "seed {seed} peer {i}");
+        }
         assert!(n.finalized(0).len() > 20);
     }
 }
 
 #[test]
 fn partition_then_heal_ends_cleared_not_accused() {
-    use crate::audit::{ChallengeKind, Status};
-    let mut n = net(busy_pair(), PipelineConfig::default(), 2);
+    let mut n = net(busy_trio(), config(), 2);
     n.run(100);
-    // Accountability traffic is cut for 10 s; play continues (separate reliable path).
-    n.drop = Box::new(|_, now, m| {
-        matches!(m, PipeMsg::Challenge(_) | PipeMsg::Response(_)) && (100..900).contains(&now)
+    n.drop = Box::new(|_, now, o| {
+        matches!(o.msg, PipeMsg::Challenge(_) | PipeMsg::Response(_)) && (100..900).contains(&now)
     });
-    let now = n.now;
+    let (now, target) = (n.now, ids(&n)[0]);
     n.peers[1]
         .pipe
         .auditor_mut()
-        .challenge(ChallengeKind::Replay { epoch_start: 0 }, now)
+        .challenge(target, ChallengeKind::Replay { epoch_start: 0 }, now)
         .unwrap();
     n.run(1800);
-    let s = statuses(&n, 1);
-    assert_eq!(s.last(), Some(&Status::Cleared), "{s:?}");
+    assert_eq!(statuses(&n, 1).last(), Some(&Status::Cleared));
     assert!(n.violations(1).is_empty());
 }
 
 #[test]
 fn audit_traffic_is_bounded_and_flooding_is_dropped() {
-    use crate::audit::{Challenge, ChallengeBook, ChallengeKind, Timing};
-    let mut n = net(busy_pair(), PipelineConfig::default(), 2);
+    use crate::audit::{ChallengeBook, Timing};
+    let mut n = net(busy_trio(), config(), 2);
     n.run(60);
-    let mut spam = ChallengeBook::new(keys()[0].clone(), MATCH, Timing::default());
+    let flooder = n.cast.keys[0].clone();
+    let victim = ids(&n)[1];
+    let mut spam = ChallengeBook::new(flooder.clone(), MATCH, Timing::default());
     let mut sent = 0;
     for i in 0..5000u64 {
-        if let Ok(c) = spam.issue(keys()[1].id(), ChallengeKind::Ack { seq: i }, n.now) {
-            n.wire[1].push_back((n.now, PipeMsg::Challenge(c).encode().unwrap()));
+        if let Ok(c) = spam.issue(victim, ChallengeKind::Ack { seq: i }, n.now) {
+            let msg = PipeMsg::Challenge(c);
+            n.inject_wire(1, 0, msg.encode().unwrap());
             sent += 1;
         }
         spam.gc();
-        let _: Option<Challenge> = spam.poll_outbox();
+        let _ = spam.poll_outbox();
         if i % 8 == 7 {
-            spam = ChallengeBook::new(keys()[0].clone(), MATCH, Timing::default());
+            spam = ChallengeBook::new(flooder.clone(), MATCH, Timing::default());
             for _ in 0..=i {
                 spam.next_nonce_bump();
             }
@@ -793,20 +641,22 @@ fn audit_traffic_is_bounded_and_flooding_is_dropped() {
         answered <= crate::audit::ChallengeGate::MAX_PER_CHALLENGER as u64 + 4,
         "answered {answered}"
     );
-    assert!(n.violations(0).is_empty() && n.violations(1).is_empty());
+    assert!((0..3).all(|i| n.violations(i).is_empty()));
 }
 
 #[test]
 fn auditor_restart_restores_log_and_reverifies_persisted_evidence() {
     use crate::audit::{AuditLog, Evidence};
     use crate::{Checkpoint, SignedCheckpoint};
+    use gv_core::Roster;
     use gv_sig::SigningKey;
     let (a, b) = (
         SigningKey::from_seed([1; 32]),
         SigningKey::from_seed([2; 32]),
     );
     let (m, r) = ([7u8; 32], [9u8; 32]);
-    let mut auditor = super::Auditor::new(a.clone(), [a.id(), b.id()], m, r).unwrap();
+    let roster = Roster::players(&[a.id(), b.id()]).unwrap();
+    let mut auditor = super::Auditor::new(a.clone(), &roster, m, r).unwrap();
     auditor.use_ephemeral_store_for_tests();
     let mut log = AuditLog::new(m, a.id());
     for i in 0..10u64 {
@@ -816,6 +666,7 @@ fn auditor_restart_restores_log_and_reverifies_persisted_evidence() {
         SignedCheckpoint::sign(
             Checkpoint {
                 match_id: m,
+                session: [3; 32],
                 ruleset: r,
                 epoch_start: 0,
                 epoch_length: 20,
@@ -837,17 +688,18 @@ fn auditor_restart_restores_log_and_reverifies_persisted_evidence() {
         report.recovery,
         crate::audit::trust::Recovery::Resumed { .. }
     ));
-    let restored = report.evidence_restored;
-    assert_eq!(restored, 1, "only evidence that still verifies is restored");
+    assert_eq!(
+        report.evidence_restored, 1,
+        "only evidence that still verifies is restored"
+    );
     assert_eq!(auditor.log().head(), log.head());
     assert_eq!(auditor.ledger().proven_total(), 1);
-    // A log for another owner or match is never adopted.
     let foreign = AuditLog::new(m, b.id());
     assert!(!auditor.restore(Some(foreign), &[], &[]).recovery.may_sign());
 }
 
-/// Build the archive exactly as the host does: certified epochs as receipts, the disputed epoch
-/// as an explicit gap carrying the fraud proof.
+/// Build the archive as the host does: certified epochs as receipts, a disputed epoch as an
+/// explicit gap carrying the fraud proof.
 fn archive_of(n: &Net, i: usize) -> crate::CertifiedMatch {
     use crate::{ArchiveBuilder, CertifiedEpoch, CertifiedMatch, CheckpointEvidence};
     let empty = CertifiedMatch {
@@ -864,7 +716,7 @@ fn archive_of(n: &Net, i: usize) -> crate::CertifiedMatch {
         .collect();
     for e in n.peers[i].pipe.replica().accepted() {
         if e.signatures.is_some() {
-            b.push(&CertifiedEpoch::from_accepted(e, roster()).unwrap())
+            b.push(&CertifiedEpoch::from_accepted(e, &n.cast.session).unwrap())
                 .unwrap();
         } else {
             let p = proofs
@@ -880,42 +732,41 @@ fn archive_of(n: &Net, i: usize) -> crate::CertifiedMatch {
 #[test]
 fn archive_continues_past_a_disputed_epoch_and_verifies_independently() {
     use crate::export::{export_match, verify_package, DisclosurePolicy, TrustAnchor, Verified};
-    use gv_replay::StateMachine as _;
-    let scripts = [held(grid::UP, 3, 60, 400), held(grid::DOWN, 10, 40, 400)];
-    let mut n = net(scripts.clone(), PipelineConfig::default(), 2);
+    let scripts = vec![
+        held(grid::UP, 3, 60, 400),
+        held(grid::DOWN, 10, 40, 400),
+        held(grid::LEFT, 12, 44, 400),
+    ];
+    let mut n = net(scripts, config(), 2);
     n.run(10);
     n.peers[1].pipe.inject_cheat();
     n.run(390);
-    let rules = GridRules::new(roster());
-    for i in 0..2 {
+    let session = n.cast.session.clone();
+    for i in 0..3 {
         let archive = archive_of(&n, i);
         assert_eq!(archive.disputed(), 1, "peer {i}");
         assert!(
             archive.epochs.len() >= 2,
             "valid play after the dispute is exported"
         );
-        let first_after = archive.disputes[0].after;
         assert!(
-            first_after < archive.epochs.len(),
+            archive.disputes[0].after < archive.epochs.len(),
             "certified epochs follow the gap"
         );
-        // Independent replay from genesis reaches the live verified head exactly.
-        let replica = archive.restore(MATCH, roster(), rules.clone()).unwrap();
+        let replica = archive.restore(session.clone(), GridRules).unwrap();
         assert_eq!(replica.next_tick(), n.peers[i].pipe.verified_tick());
         assert_eq!(replica.state(), n.peers[i].pipe.verified_state());
         assert_eq!(
             replica.previous_checkpoint(),
             n.peers[i].pipe.replica().previous_checkpoint()
         );
-        // And as a package, with only pinned facts.
-        let pkg =
-            export_match(&rules, MATCH, roster(), &archive, DisclosurePolicy::PUBLIC).unwrap();
+        let pkg = export_match(&GridRules, &session, &archive, DisclosurePolicy::PUBLIC).unwrap();
         let anchor = TrustAnchor {
             match_id: MATCH,
-            ruleset: rules.ruleset_hash(),
-            roster: roster(),
+            ruleset: GridRules.ruleset_hash(),
+            session: session.digest(),
         };
-        let (_, v) = verify_package(&pkg.encode().unwrap(), &anchor, &rules).unwrap();
+        let (_, v) = verify_package(&pkg.encode().unwrap(), &anchor, &GridRules).unwrap();
         match v {
             Verified::Match {
                 disputed, segments, ..
@@ -925,31 +776,22 @@ fn archive_continues_past_a_disputed_epoch_and_verifies_independently() {
             }
             other => panic!("{other:?}"),
         }
-        // The gap cannot be forged, dropped, moved or reused.
+        let restores = |a: &crate::CertifiedMatch| a.restore(session.clone(), GridRules).is_ok();
         let mut dropped = archive.clone();
         dropped.disputes.clear();
-        assert!(
-            dropped.restore(MATCH, roster(), rules.clone()).is_err(),
-            "gap removed"
-        );
+        assert!(!restores(&dropped), "gap removed");
         let mut moved = archive.clone();
         moved.disputes[0].after += 1;
-        assert!(
-            moved.restore(MATCH, roster(), rules.clone()).is_err(),
-            "gap moved"
-        );
+        assert!(!restores(&moved), "gap moved");
         let mut doubled = archive.clone();
         doubled.disputes.push(crate::Dispute {
             after: doubled.epochs.len(),
             proof: archive.disputes[0].proof.clone(),
         });
-        assert!(
-            doubled.restore(MATCH, roster(), rules.clone()).is_err(),
-            "proof reused"
-        );
+        assert!(!restores(&doubled), "proof reused");
         let mut reordered = archive.clone();
         reordered.epochs.swap(0, 1);
-        assert!(reordered.restore(MATCH, roster(), rules.clone()).is_err());
+        assert!(!restores(&reordered));
         let enc = archive.encode().unwrap();
         for cut in [1usize, 17, enc.len() / 2] {
             assert!(crate::CertifiedMatch::decode(&enc[..enc.len() - cut]).is_err());
@@ -959,227 +801,19 @@ fn archive_continues_past_a_disputed_epoch_and_verifies_independently() {
 
 #[test]
 fn an_honest_epoch_cannot_be_relabelled_as_disputed() {
-    // A proof must show a claim that replay refutes; a valid, co-signed claim is not one.
-    let scripts = [held(grid::UP, 3, 60, 200), held(grid::DOWN, 10, 40, 200)];
-    let mut n = net(scripts, PipelineConfig::default(), 2);
+    let scripts = vec![
+        held(grid::UP, 3, 60, 200),
+        held(grid::DOWN, 10, 40, 200),
+        vec![],
+    ];
+    let mut n = net(scripts, config(), 2);
     n.run(200);
-    let rules = GridRules::new(roster());
     let honest = archive_of(&n, 0);
     assert_eq!(honest.disputed(), 0);
-    let first = &honest.epochs[0];
     let mut fake = honest.clone();
     fake.disputes.push(crate::Dispute {
         after: 0,
-        proof: first.witnesses[0].clone(),
+        proof: honest.epochs[0].evidence.clone(),
     });
-    assert!(fake.restore(MATCH, roster(), rules).is_err());
-}
-
-/// Long-running adversarial soak (ignored by default):
-///   GV_SOAK_SECS=3600 cargo test -p gv-edge --release soak_ -- --ignored --nocapture
-/// Back-to-back 60 Hz matches between two honest pipelines on a hostile in-process network
-/// (random loss of accountability traffic, duplication, reordering, variable delay), with
-/// pruning, repeated challenges whose answers are withheld and then delivered late, a
-/// periodic comparison against the independent replay, and a resource/latency report.
-/// Honest peers must never be accused, must keep certifying identical epochs, and the
-/// certified state must equal the independent replay at every comparison.
-#[test]
-#[ignore]
-fn soak_honest_pair_under_faults_pruning_and_delayed_challenges() {
-    use crate::audit::{ChallengeKind, Status};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-    let secs: u64 = std::env::var("GV_SOAK_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20);
-    let started = std::time::Instant::now();
-    let rss_kb = || -> u64 {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("VmRSS:"))
-                    .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse().ok()))
-            })
-            .unwrap_or(0)
-    };
-    let (mut matches, mut total_ticks, mut total_epochs) = (0u64, 0u64, 0u64);
-    let (mut challenges, mut cleared, mut suspected) = (0u64, 0u64, 0u64);
-    let rss_start = rss_kb();
-    let mut rss_peak = rss_start;
-    let mut finality: Vec<u64> = Vec::new(); // ticks between an epoch's end and its certification
-    while started.elapsed().as_secs() < secs {
-        matches += 1;
-        let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(matches);
-        let ticks_per_match = 120_000u64; // 33 min of play per match
-        let rng = Arc::new(AtomicU64::new(seed | 1));
-        let next = {
-            let rng = rng.clone();
-            move || {
-                let mut x = rng.load(Ordering::Relaxed);
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                rng.store(x, Ordering::Relaxed);
-                x
-            }
-        };
-        let script = |salt: u64| -> Vec<u16> {
-            let mut v = Vec::with_capacity(ticks_per_match as usize);
-            let mut cur = 0u16;
-            let mut x = seed ^ salt;
-            for _ in 0..ticks_per_match {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                if x % 37 == 0 {
-                    cur = [
-                        0,
-                        grid::UP,
-                        grid::DOWN,
-                        grid::LEFT,
-                        grid::RIGHT,
-                        grid::ACT,
-                        grid::HOLD,
-                    ][(x >> 8) as usize % 7];
-                }
-                v.push(cur);
-            }
-            v
-        };
-        let scripts = [script(1), script(2)];
-        let mut n = net(scripts.clone(), PipelineConfig::default(), 3);
-        let dropper = next.clone();
-        n.drop = Box::new(move |_, _, m| {
-            matches!(
-                m,
-                PipeMsg::Auth(_) | PipeMsg::Challenge(_) | PipeMsg::Response(_)
-            ) && dropper() % 5 == 0
-        });
-        let mut done = 0u64;
-        let chunk = 600u64;
-        let mut chal_open_at: Option<u64> = None;
-        while done < ticks_per_match && started.elapsed().as_secs() < secs {
-            n.run(chunk);
-            done += chunk;
-            // every ~20 s of play: challenge the other side, whose answers are withheld ~7 s
-            if done % 1200 == 0 && chal_open_at.is_none() {
-                let now = n.now;
-                let (asker, target) = if next() % 2 == 0 { (0, 1) } else { (1, 0) };
-                n.peers[target]
-                    .pipe
-                    .auditor_mut()
-                    .withhold_answers_until(now + 420);
-                if n.peers[asker]
-                    .pipe
-                    .auditor_mut()
-                    .challenge(ChallengeKind::Ack { seq: 1 }, now)
-                    .is_some()
-                {
-                    challenges += 1;
-                    chal_open_at = Some(now);
-                }
-            }
-            if let Some(at) = chal_open_at {
-                if n.now > at + 1500 {
-                    chal_open_at = None;
-                }
-            }
-            if done % 6000 == 0 {
-                for p in &mut n.peers {
-                    p.pipe.prune_history(64);
-                }
-            }
-            for i in 0..2 {
-                assert!(
-                    n.violations(i).is_empty(),
-                    "match {matches}: honest peer accused at tick {done}: {:?}",
-                    n.violations(i)
-                );
-            }
-            assert_eq!(n.finalized(0), n.finalized(1), "certified epochs diverged");
-            if done % 12_000 == 0 {
-                let t = n.peers[0].pipe.verified_tick();
-                assert_eq!(
-                    n.peers[0].pipe.verified_tick(),
-                    n.peers[1].pipe.verified_tick()
-                );
-                assert_eq!(
-                    n.peers[0].pipe.verified_state(),
-                    reference(&scripts, t).as_slice(),
-                    "certified state differs from the independent replay at tick {t}"
-                );
-            }
-            let (c, s) = (0..2).fold((0, 0), |(c, s), i| {
-                let st = statuses(&n, i);
-                (
-                    c + st.iter().filter(|x| **x == Status::Cleared).count(),
-                    s + st
-                        .iter()
-                        .filter(|x| **x == Status::SuspectedNonCooperation)
-                        .count(),
-                )
-            });
-            cleared += c as u64;
-            suspected += s as u64;
-            for (end, certified_at) in n.peers[0].events.iter().filter_map(|(at, e)| match e {
-                PipeEvent::Finalized { end, .. } => Some((*end, *at)),
-                _ => None,
-            }) {
-                finality.push(certified_at.saturating_sub(end));
-            }
-            total_epochs += n.finalized(0).len() as u64;
-            for p in &mut n.peers {
-                p.events.clear();
-                p.sent.clear();
-            }
-            rss_peak = rss_peak.max(rss_kb());
-        }
-        // Quiesce: no new challenges, let any in-flight one resolve (answers are retried).
-        // The scripted late answer may itself have been dropped and be waiting on a backed-off retry.
-        for _ in 0..60 {
-            n.run(600);
-            if (0..2).all(|i| n.peers[i].pipe.auditor().stats().pending == 0) {
-                break;
-            }
-        }
-        total_ticks += done;
-        // Every challenge opened by the end must have been resolved by a late answer, never a verdict.
-        assert_eq!(
-            n.peers[0].pipe.auditor().stats().pending,
-            0,
-            "match {matches}"
-        );
-        assert_eq!(
-            n.peers[1].pipe.auditor().stats().pending,
-            0,
-            "match {matches}"
-        );
-        eprintln!(
-            "soak: match {matches} done: {done} ticks, rss {} MiB, elapsed {} s",
-            rss_kb() / 1024,
-            started.elapsed().as_secs()
-        );
-    }
-    finality.sort_unstable();
-    let pct = |p: f64| {
-        finality
-            .get(((finality.len() as f64 * p) as usize).min(finality.len().saturating_sub(1)))
-            .copied()
-            .unwrap_or(0)
-    };
-    eprintln!(
-        "SOAK SUMMARY: {} s wall, {matches} matches, {total_ticks} ticks ({:.1} h of 60 Hz play), {total_epochs} certified epochs, \
-         {challenges} scripted late-answer challenges; challenge status events: {suspected} suspected-non-cooperation, {cleared} cleared; 0 accusations, \
-         rss start {} MiB peak {} MiB end {} MiB, finality ticks p50/p95/p99 = {}/{}/{}",
-        started.elapsed().as_secs(),
-        total_ticks as f64 / 216_000.0,
-        rss_start / 1024,
-        rss_peak / 1024,
-        rss_kb() / 1024,
-        pct(0.50),
-        pct(0.95),
-        pct(0.99)
-    );
+    assert!(fake.restore(n.cast.session.clone(), GridRules).is_err());
 }

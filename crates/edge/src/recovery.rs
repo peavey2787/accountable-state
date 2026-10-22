@@ -1,13 +1,15 @@
 //! Checkpoint-driven recovery: never trust a disk receipt without independent
 //! replay from a pinned genesis or already authenticated checkpoint.
 #![forbid(unsafe_code)]
+use super::checkpoint::state_commitment;
+use super::history::MAX_CERTIFIED_EPOCH_BYTES;
 use super::{
     verify_checkpoint_evidence_with, CertifiedEpoch, CheckpointEvidence, EdgeError,
     EvidenceVerdict, MatchReplica, StateMachine,
 };
-use gv_core::{MatchId, PlayerId};
+use gv_core::Session;
 
-const MAGIC: &[u8] = b"GV-CERTIFIED-MATCH/V1\0";
+const MAGIC: &[u8] = b"GV-CERTIFIED-MATCH/V2\0";
 const MAX_CERTIFICATES: usize = 16384;
 const MAX_BYTES: usize = 512 * 1024 * 1024;
 
@@ -40,8 +42,8 @@ impl ArchiveBuilder {
         self.certified += 1;
         Ok(())
     }
-    /// Record an epoch closed by proven fraud (no dual signature exists for it). The proof, with
-    /// both players' signed inputs, lets a verifier replay the epoch and carry on from it.
+    /// Record an epoch closed by proven fraud (no certification exists for it). The proof, with
+    /// every participant's signed inputs, lets a verifier replay the epoch and carry on from it.
     pub fn push_dispute(&mut self, proof: &CheckpointEvidence) -> Result<(), EdgeError> {
         let body = proof.encode().map_err(|_| EdgeError::BadCheckpoint)?;
         self.append_item(ITEM_DISPUTED, &body)
@@ -77,9 +79,9 @@ impl ArchiveBuilder {
     }
 }
 
-/// An epoch that was closed by proven fraud instead of two matching signatures. It stays in the
+/// An epoch that was closed by proven fraud instead of a certifying set of signatures. It stays in the
 /// archive as an explicit, independently checkable gap: `proof` shows a signed claim that replay
-/// of both players' signed inputs refutes, and the honest replay result is what the next
+/// of every participant's signed inputs refutes, and the honest replay result is what the next
 /// certified epoch links to.
 #[derive(Clone, Debug)]
 pub struct Dispute {
@@ -105,7 +107,7 @@ impl CertifiedMatch {
             return Err(EdgeError::ResourceLimit);
         }
         // Mode byte: 1 = produced by the live engine (replayed with illegal
-        // controls neutralized), 0 = strict replay.
+        // events neutralized), 0 = strict replay.
         let mut b = MAGIC.to_vec();
         b.push(u8::from(self.live));
         b.extend_from_slice(&((self.epochs.len() + self.disputes.len()) as u32).to_le_bytes());
@@ -174,7 +176,7 @@ impl CertifiedMatch {
                     .try_into()
                     .map_err(|_| EdgeError::BadCheckpoint)?,
             ) as usize;
-            if n > 4_000_000 {
+            if n > MAX_CERTIFIED_EPOCH_BYTES {
                 return Err(EdgeError::ResourceLimit);
             }
             let body = take(b, &mut pos, n)?;
@@ -204,82 +206,71 @@ impl CertifiedMatch {
         }
         Ok(me)
     }
-    /// Replay from a match ID, known ruleset and authenticated player roster.
-    /// This accepts NO unauthenticated snapshots and validates EVERY predecessor.
+    /// Replay from an authenticated session (match id, roster and certification policy), a
+    /// known ruleset and nothing else. This accepts NO unauthenticated snapshots and validates
+    /// EVERY predecessor.
     pub fn restore<R: StateMachine>(
         &self,
-        match_id: MatchId,
-        roster: [PlayerId; 2],
+        session: Session,
         rules: R,
     ) -> Result<MatchReplica<R>, EdgeError> {
-        let mut replica = MatchReplica::new(match_id, roster, rules)?;
+        let mut replica = MatchReplica::new(session, rules)?;
         if self.live {
             replica = replica.live();
         }
         let mut next_dispute = 0;
         for (i, cert) in self.epochs.iter().enumerate() {
             while next_dispute < self.disputes.len() && self.disputes[next_dispute].after == i {
-                self.apply_dispute(&mut replica, match_id, &self.disputes[next_dispute].proof)?;
+                self.apply_dispute(&mut replica, &self.disputes[next_dispute].proof)?;
                 next_dispute += 1;
             }
-            let witnesses = &cert.witnesses;
-            let claim = &witnesses[0].accused.claim;
-            if claim.match_id != match_id
+            let evidence = &cert.evidence;
+            let claim = &evidence.accused.claim;
+            if evidence.session != replica.session
                 || claim.epoch_start != replica.next_tick()
                 || claim.previous_checkpoint != replica.previous_checkpoint()
-                || witnesses[0].roster != replica.roster
                 || cert.verify_with(
                     &replica.rules,
                     replica.previous_checkpoint(),
-                    gv_commitments::commit_state(&gv_core::StateOpening {
-                        bytes: replica.state().to_vec(),
-                        nonce: [0; 32],
-                    }),
+                    state_commitment(replica.state()),
                     self.live,
                 ) != EvidenceVerdict::ValidClaim
             {
                 return Err(EdgeError::BadCheckpoint);
             }
-            for batch in &witnesses[0].player_batches {
+            for batch in evidence.inputs.iter().flatten() {
                 replica.admit(batch.clone())?;
             }
             if replica.candidate()?.checkpoint != *claim {
                 return Err(EdgeError::BadCheckpoint);
             }
-            let signatures = [witnesses[0].accused.clone(), witnesses[1].accused.clone()];
-            replica.finalize(signatures)?;
+            replica.finalize(cert.signatures())?;
         }
         for d in &self.disputes[next_dispute..] {
-            self.apply_dispute(&mut replica, match_id, &d.proof)?;
+            self.apply_dispute(&mut replica, &d.proof)?;
         }
         Ok(replica)
     }
     /// Advance over a disputed epoch: the proof must show a signed claim for exactly this
     /// position that replay of the signed inputs refutes. The honest replay result becomes the
-    /// chain head, so the continuation is linked to it and not to anything either player signed.
+    /// chain head, so the continuation is linked to it and not to anything a participant signed.
     fn apply_dispute<R: StateMachine>(
         &self,
         replica: &mut MatchReplica<R>,
-        match_id: MatchId,
         proof: &CheckpointEvidence,
     ) -> Result<(), EdgeError> {
         let claim = &proof.accused.claim;
-        if claim.match_id != match_id
+        if proof.session != replica.session
             || claim.epoch_start != replica.next_tick()
             || claim.previous_checkpoint != replica.previous_checkpoint()
-            || proof.roster != replica.roster
             || proof.trusted_previous_checkpoint != replica.previous_checkpoint()
-            || proof.trusted_previous_state
-                != gv_commitments::commit_state(&gv_core::StateOpening {
-                    bytes: replica.state().to_vec(),
-                    nonce: [0; 32],
-                })
+            || proof.trusted_previous_state != state_commitment(replica.state())
             || verify_checkpoint_evidence_with(&replica.rules, proof, self.live)
                 != EvidenceVerdict::ProvenInvalidState
         {
             return Err(EdgeError::BadCheckpoint);
         }
-        for batch in &proof.player_batches {
+        for batch in proof.inputs.iter().flatten() {
             replica.admit(batch.clone())?;
         }
         if replica.candidate()?.checkpoint == *claim {

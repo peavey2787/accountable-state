@@ -340,7 +340,7 @@ impl Persistence {
         let Some(last) = pipe.replica().accepted().last() else {
             return;
         };
-        match CertifiedEpoch::from_accepted(last, pipe.replica().roster) {
+        match CertifiedEpoch::from_accepted(last, pipe.session()) {
             Ok(cert) => {
                 if let Err(e) = self.archive.push(&cert) {
                     sink.fault(format!("cannot encode receipts: {e:?}"));

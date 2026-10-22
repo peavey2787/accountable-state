@@ -1,14 +1,14 @@
 //! Standalone self-contained fraud evidence: authenticated certified history
 //! PLUS the disputed next signed state claim. No quorum votes on validity.
 #![forbid(unsafe_code)]
+use super::checkpoint::state_commitment;
 use super::{
     verify_checkpoint_evidence_with, CertifiedMatch, CheckpointError, CheckpointEvidence,
     EdgeError, EvidenceVerdict, StateMachine,
 };
-use gv_commitments::commit_state;
-use gv_core::{MatchId, PlayerId, StateOpening};
+use gv_core::Session;
 
-const MAGIC: &[u8] = b"GV-FRAUD-BUNDLE/V1\0";
+const MAGIC: &[u8] = b"GV-FRAUD-BUNDLE/V2\0";
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct FraudBundle {
@@ -75,30 +75,20 @@ impl FraudBundle {
             allegation,
         })
     }
-    /// The verifier receives the match ID and BOTH player public keys through
-    /// an independently trusted invitation / tournament manifest.
-    pub fn verify<R: StateMachine + Clone>(
-        &self,
-        match_id: MatchId,
-        roster: [PlayerId; 2],
-        rules: R,
-    ) -> EvidenceVerdict {
+    /// The verifier receives the session (match id, roster, certification policy) through an
+    /// independently trusted invitation / tournament manifest.
+    pub fn verify<R: StateMachine + Clone>(&self, session: Session, rules: R) -> EvidenceVerdict {
         let fail = || EvidenceVerdict::Inconclusive(CheckpointError::InvalidHistory);
-        let Ok(replica) = self.history.restore(match_id, roster, rules.clone()) else {
+        let Ok(replica) = self.history.restore(session, rules.clone()) else {
             return fail();
         };
         let claim = &self.allegation.accused.claim;
-        if claim.match_id != match_id
+        if self.allegation.session != replica.session
             || claim.epoch_start != replica.next_tick()
             || claim.previous_checkpoint != replica.previous_checkpoint()
-            || claim.previous_state
-                != commit_state(&StateOpening {
-                    bytes: replica.state().to_vec(),
-                    nonce: [0; 32],
-                })
+            || claim.previous_state != state_commitment(replica.state())
             || self.allegation.trusted_previous_checkpoint != replica.previous_checkpoint()
             || self.allegation.trusted_previous_state != claim.previous_state
-            || self.allegation.roster != replica.roster
             || self.allegation.previous_state.as_slice() != replica.state()
         {
             return fail();

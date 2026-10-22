@@ -1,9 +1,8 @@
-//! Per-peer accountability engine that runs beside the 60 Hz pipeline. It keeps
-//! the tamper-evident log, exchanges authenticators once per epoch, audits the
-//! opponent's chain with signed challenges, and records proven misbehavior in a
-//! deterministic ledger. It never blocks or delays play: every call is O(1)
+//! Per-participant accountability engine that runs beside the real-time pipeline. It keeps the
+//! tamper-evident log, exchanges authenticators once per epoch, audits every other participant's
+//! chain with signed challenges, and records proven misbehavior in a deterministic ledger. It never blocks or delays play: every call is O(1)
 //! amortized and all network I/O is queued messages.
-use super::msg::PipeMsg;
+use super::msg::{Outgoing, PipeMsg};
 use crate::audit::{
     challenge::{ChallengeBook, ChallengeGate, ChallengeKind, Response, Status, Timing},
     journal::TrustStore,
@@ -11,15 +10,15 @@ use crate::audit::{
     AuditLog, Authenticator, Challenge, Evidence, Ledger, Outcome, Segment,
 };
 use crate::SignedCheckpoint;
-use gv_codec::SignedPackedControls;
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_codec::SignedEventBatch;
+use gv_core::{Digest, MatchId, ParticipantId, Roster};
 use gv_sig::SigningKey;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const KIND_BATCH: u8 = 1;
 const KIND_CHECKPOINT: u8 = 2;
-/// Audit the opponent's chain every this many authenticators (~3 s at 20-tick epochs).
+/// Audit a peer's chain every this many of its authenticators.
 const AUDIT_EVERY: u64 = 10;
 const MAX_SEEN_AUTH: usize = 256;
 const MAX_BATCH_CACHE: usize = 512;
@@ -31,7 +30,7 @@ const LOG_KEEP: usize = 8192;
 pub enum AuditEvent {
     /// Cryptographic proof of equivocation (exportable, offline-verifiable).
     ProvenEquivocation {
-        accused: PlayerId,
+        accused: ParticipantId,
         id: Digest,
         evidence: Vec<u8>,
     },
@@ -92,28 +91,29 @@ impl Answers for NoAnswers {
 
 pub struct Auditor {
     key: SigningKey,
-    me: PlayerId,
-    other: PlayerId,
-    roster: [PlayerId; 2],
+    me: ParticipantId,
+    /// Every other roster member: each is audited and challenged individually.
+    peers: Vec<ParticipantId>,
+    roster: Vec<ParticipantId>,
     match_id: MatchId,
     ruleset: Digest,
     log: AuditLog,
     book: ChallengeBook,
     gate: ChallengeGate,
     ledger: Ledger,
-    seen: BTreeMap<u64, Authenticator>,
-    /// Latest opponent authenticator whose chain we verified (or adopted as baseline).
-    checked: Option<Authenticator>,
+    seen: BTreeMap<(ParticipantId, u64), Authenticator>,
+    /// Per peer: latest authenticator whose chain we verified (or adopted as baseline).
+    checked: BTreeMap<ParticipantId, Authenticator>,
     batches: BTreeMap<u64, Vec<u8>>,
-    their_batches: Vec<SignedPackedControls>,
+    their_batches: Vec<SignedEventBatch>,
     their_checkpoints: Vec<SignedCheckpoint>,
-    outbox: VecDeque<PipeMsg>,
+    outbox: VecDeque<Outgoing>,
     events: VecDeque<AuditEvent>,
     stats: AuditStats,
-    auth_count: u64,
+    auth_count: BTreeMap<ParticipantId, u64>,
     withhold_until: u64,
     equivocate_next: bool,
-    kinds: BTreeMap<Digest, ChallengeKind>,
+    kinds: BTreeMap<Digest, (ChallengeKind, ParticipantId)>,
     pins: Pins,
     pins_dirty: bool,
     recovery: Recovery,
@@ -121,7 +121,7 @@ pub struct Auditor {
     /// Log positions kept alive for challenges against me: id -> (from, release_tick).
     gate_pins: BTreeMap<Digest, (u64, u64)>,
     /// Pinned third-party witnesses allowed to challenge me (never gameplay authorities).
-    witnesses: BTreeSet<PlayerId>,
+    witnesses: BTreeSet<ParticipantId>,
     witness_responses: VecDeque<Response>,
     /// Write-ahead barrier. Nothing signed leaves until a store is attached.
     store: Durability,
@@ -134,15 +134,18 @@ pub struct Auditor {
     /// Signing stays suspended until the anchor check is complete (see [`AnchorCheck`]).
     anchor_pending: bool,
     anchor: AnchorCheck,
+    /// Peers that must answer an anchor check before signing resumes.
+    anchor_quorum: usize,
 }
 
-/// Who has answered the anchor check after a (re)start. The opponent's answer is mandatory: it
-/// receives every head I sign. When witnesses are pinned, signing additionally waits for one of
-/// them to hand back a head of mine or for [`ANCHOR_WITNESS_WAIT`] ticks to pass, so a newer head
-/// withheld by the opponent is still recovered if any honest witness holds it.
+/// Who has answered the anchor check after a (re)start. Every peer receives every head I sign,
+/// so by default every peer must answer (`anchor_quorum`). When witnesses are pinned, signing
+/// additionally waits for one of them to hand back a head of mine or for [`ANCHOR_WITNESS_WAIT`]
+/// ticks to pass, so a newer head withheld by the peers is still recovered if any honest witness
+/// holds it.
 #[derive(Default)]
 struct AnchorCheck {
-    opponent: Option<AnchorAnswer>,
+    answers: BTreeMap<ParticipantId, AnchorAnswer>,
     witness_answered: bool,
     wait_until: u64,
 }
@@ -153,7 +156,7 @@ enum AnchorAnswer {
     NoHeads,
 }
 
-/// Ticks to wait for a witness-held head after the opponent answered an anchor check.
+/// Ticks to wait for a witness-held head after the peers answered an anchor check.
 pub const ANCHOR_WITNESS_WAIT: u64 = 600;
 
 /// Where signed state is made durable before it may leave the process.
@@ -176,13 +179,18 @@ pub struct RestoreReport {
 impl Auditor {
     pub fn new(
         key: SigningKey,
-        roster: [PlayerId; 2],
+        roster: &Roster,
         match_id: MatchId,
         ruleset: Digest,
     ) -> Option<Self> {
         let me = key.id();
-        let other = roster.iter().copied().find(|p| *p != me)?;
+        let roster: Vec<ParticipantId> = roster.participants().iter().map(|p| p.id).collect();
+        if !roster.contains(&me) {
+            return None;
+        }
+        let peers: Vec<ParticipantId> = roster.iter().copied().filter(|p| *p != me).collect();
         Some(Self {
+            anchor_quorum: peers.len(),
             log: AuditLog::new(match_id, me),
             book: ChallengeBook::new(
                 key.clone(),
@@ -196,19 +204,19 @@ impl Auditor {
             ledger: Ledger::new(),
             key,
             me,
-            other,
+            peers,
             roster,
             match_id,
             ruleset,
             seen: BTreeMap::new(),
-            checked: None,
+            checked: BTreeMap::new(),
             batches: BTreeMap::new(),
             their_batches: Vec::new(),
             their_checkpoints: Vec::new(),
             outbox: VecDeque::new(),
             events: VecDeque::new(),
             stats: AuditStats::default(),
-            auth_count: 0,
+            auth_count: BTreeMap::new(),
             withhold_until: 0,
             equivocate_next: false,
             kinds: BTreeMap::new(),
@@ -256,13 +264,15 @@ impl Auditor {
                 .push_back(AuditEvent::RecoveryNotTrusted(verdict.clone()));
         }
         self.recovery = verdict.clone();
-        // Pinned opponent heads are the baseline for auditing their resumed history.
-        let theirs: Vec<Authenticator> = self.pins.for_owner(self.other).cloned().collect();
-        for a in theirs {
-            self.seen.insert(a.seq, a);
-        }
-        if let Some(best) = self.pins.highest(self.other) {
-            self.checked = Some(best.clone());
+        // Pinned peer heads are the baseline for auditing their resumed history.
+        for peer in self.peers.clone() {
+            let theirs: Vec<Authenticator> = self.pins.for_owner(peer).cloned().collect();
+            for a in theirs {
+                self.seen.insert((peer, a.seq), a);
+            }
+            if let Some(best) = self.pins.highest(peer) {
+                self.checked.insert(peer, best.clone());
+            }
         }
         let mut restored = 0;
         for bytes in evidence {
@@ -277,8 +287,7 @@ impl Auditor {
             evidence_restored: restored,
         }
     }
-    /// Hand over an authenticated head obtained after the restart (from the opponent or a
-    /// witness). If it anchors a held log, recovery completes.
+    /// Hand over an authenticated head obtained after the restart (from a peer or a witness). If it anchors a held log, recovery completes.
     pub fn supply_anchor(&mut self, a: &Authenticator) {
         self.pin(a);
         if a.owner != self.me {
@@ -333,19 +342,24 @@ impl Auditor {
         self.recovery = Recovery::Fresh;
         true
     }
-    /// Ask the opponent for the highest head of mine it holds and suspend signing until an
-    /// anchor check completes ([`AnchorCheck`]). Call after every (re)start of a participant:
-    /// state loss is only detectable against heads held elsewhere.
+    /// Ask every peer for the highest head of mine it holds and suspend signing until an anchor
+    /// check completes ([`AnchorCheck`]). Call after every (re)start of a participant: state
+    /// loss is only detectable against heads held elsewhere.
     pub fn require_anchor_check(&mut self) {
         self.anchor_pending = true;
         self.anchor = AnchorCheck::default();
-        self.outbox.push_back(PipeMsg::AnchorReq);
+        self.outbox.push_back(Outgoing::all(PipeMsg::AnchorReq));
+    }
+    /// How many peers must answer an anchor check (default: all of them). Lowering it trades
+    /// protection against a withheld newer head for liveness while peers are offline.
+    pub fn set_anchor_quorum(&mut self, quorum: usize) {
+        self.anchor_quorum = quorum.min(self.peers.len());
     }
     pub fn anchor_check_pending(&self) -> bool {
         self.anchor_pending
     }
-    /// The opponent's answer to my anchor request (wire: `PipeMsg::Anchor`).
-    fn on_anchor(&mut self, a: Option<Authenticator>) {
+    /// A peer's answer to my anchor request (wire: `PipeMsg::Anchor`).
+    fn on_anchor(&mut self, from: ParticipantId, a: Option<Authenticator>) {
         let answer = match a {
             Some(a) if self.is_own_head(&a) => {
                 self.supply_anchor(&a);
@@ -354,15 +368,20 @@ impl Auditor {
             Some(_) => return, // not mine / not valid: ignore, keep waiting
             None => AnchorAnswer::NoHeads,
         };
-        if !self.anchor_pending || self.anchor.opponent.is_some() {
+        if !self.anchor_pending
+            || !self.peers.contains(&from)
+            || self.anchor.answers.contains_key(&from)
+        {
             return;
         }
-        self.anchor.opponent = Some(answer);
-        self.anchor.wait_until = self.now + ANCHOR_WITNESS_WAIT;
+        self.anchor.answers.insert(from, answer);
+        if self.anchor.answers.len() >= self.anchor_quorum {
+            self.anchor.wait_until = self.now + ANCHOR_WITNESS_WAIT;
+        }
         self.finish_anchor_check();
     }
-    /// A head of mine held by a pinned witness (local, from the witness service; never from the
-    /// opponent's wire). It is applied even outside an anchor check: a newer head proves state loss.
+    /// A head of mine held by a pinned witness (local, from the witness service; never from a
+    /// peer's wire). It is applied even outside an anchor check: a newer head proves state loss.
     pub fn on_witness_anchor(&mut self, a: &Authenticator) {
         if self.witnesses.is_empty() || !self.is_own_head(a) {
             return;
@@ -374,21 +393,26 @@ impl Auditor {
     fn is_own_head(&self, a: &Authenticator) -> bool {
         a.owner == self.me && a.match_id == self.match_id && a.verify().is_ok()
     }
-    /// Resume signing once the trust boundary is met: the opponent answered, and (with witnesses
-    /// pinned) a witness answered or the wait elapsed. "No heads" is only believed when no
+    /// Resume signing once the trust boundary is met: the required peers answered, and (with
+    /// witnesses pinned) a witness answered or the wait elapsed. "No heads" is only believed when no
     /// source handed back any head of mine. Residual risk, documented in doc 42: if every
     /// responding source withholds a newer head, a later head of mine can still contradict it.
     fn finish_anchor_check(&mut self) {
-        let Some(opponent) = self.anchor.opponent else {
+        if self.anchor.answers.len() < self.anchor_quorum {
             return;
-        };
+        }
         let witness_done = self.witnesses.is_empty()
             || self.anchor.witness_answered
             || self.now >= self.anchor.wait_until;
         if !self.anchor_pending || !witness_done {
             return;
         }
-        if opponent == AnchorAnswer::NoHeads {
+        if self
+            .anchor
+            .answers
+            .values()
+            .all(|a| *a == AnchorAnswer::NoHeads)
+        {
             self.confirm_no_prior_heads();
         }
         self.rebase_on_anchor();
@@ -446,8 +470,8 @@ impl Auditor {
         }
     }
     /// Allow a pinned witness to audit my log with signed challenges. Answers to witnesses are
-    /// queued separately ([`Self::poll_witness_response`]) and never sent to the opponent.
-    pub fn admit_witness(&mut self, id: PlayerId) {
+    /// queued separately ([`Self::poll_witness_response`]) and never sent to a peer.
+    pub fn admit_witness(&mut self, id: ParticipantId) {
         if self.witnesses.len() < 32 && !self.roster.contains(&id) {
             self.witnesses.insert(id);
         }
@@ -564,14 +588,19 @@ impl Auditor {
         let mut n = 0;
         for c in cs {
             if self.book.resume(c, now) {
-                self.kinds.insert(c.id(), c.kind);
+                self.kinds.insert(c.id(), (c.kind, c.target));
                 n += 1;
             }
         }
-        while let Some(c) = self.book.poll_outbox() {
-            self.outbox.push_back(PipeMsg::Challenge(c));
-        }
+        self.drain_challenges();
         n
+    }
+    fn drain_challenges(&mut self) {
+        while let Some(c) = self.book.poll_outbox() {
+            let to = c.target;
+            self.outbox
+                .push_back(Outgoing::to(to, PipeMsg::Challenge(c)));
+        }
     }
     pub fn stats(&self) -> AuditStats {
         let mut s = self.stats;
@@ -589,7 +618,7 @@ impl Auditor {
     }
     /// Crate-only: hosts receive these through `Pipeline::poll_outbox`, behind the write-ahead
     /// barrier. A public drain would let signed heads leave before they are durable.
-    pub(crate) fn poll_msg(&mut self) -> Option<PipeMsg> {
+    pub(crate) fn poll_msg(&mut self) -> Option<Outgoing> {
         self.outbox.pop_front()
     }
     pub fn poll_event(&mut self) -> Option<AuditEvent> {
@@ -610,23 +639,32 @@ impl Auditor {
     pub fn equivocate_next_authenticator(&mut self) {
         self.equivocate_next = true;
     }
-    /// Demo: challenge the opponent about a batch they delivered long ago.
-    pub fn accuse_missing_batch(&mut self, start_tick: u64, now: u64) {
-        self.issue(ChallengeKind::MissingBatch { start_tick }, now);
+    /// Demo: challenge `target` about a batch they delivered long ago.
+    pub fn accuse_missing_batch(&mut self, target: ParticipantId, start_tick: u64, now: u64) {
+        self.issue(target, ChallengeKind::MissingBatch { start_tick }, now);
     }
-    fn issue(&mut self, kind: ChallengeKind, now: u64) -> Option<Digest> {
-        let c = self.book.issue(self.other, kind, now).ok()?;
+    fn issue(&mut self, target: ParticipantId, kind: ChallengeKind, now: u64) -> Option<Digest> {
+        if !self.peers.contains(&target) {
+            return None;
+        }
+        let c = self.book.issue(target, kind, now).ok()?;
         if self.kinds.len() >= 256 {
             self.kinds.pop_first();
         }
-        self.kinds.insert(c.id(), kind);
-        self.outbox.push_back(PipeMsg::Challenge(c.clone()));
+        self.kinds.insert(c.id(), (kind, target));
+        self.outbox
+            .push_back(Outgoing::to(target, PipeMsg::Challenge(c.clone())));
         Some(c.id())
     }
-    /// Ask the opponent for an arbitrary challenge kind (replay evidence, Merkle
-    /// witness, hidden reveal, ack). Bounded by the challenge book.
-    pub fn challenge(&mut self, kind: ChallengeKind, now: u64) -> Option<Digest> {
-        self.issue(kind, now)
+    /// Ask `target` for an arbitrary challenge kind (replay evidence, Merkle witness, sealed
+    /// reveal, ack). Bounded by the challenge book.
+    pub fn challenge(
+        &mut self,
+        target: ParticipantId,
+        kind: ChallengeKind,
+        now: u64,
+    ) -> Option<Digest> {
+        self.issue(target, kind, now)
     }
     /// Demo: a framing attempt. Splicing a signature is impossible (decoding
     /// verifies it), so the attacker pairs the victim's real checkpoint with a
@@ -636,12 +674,13 @@ impl Auditor {
         claim.next_state[0] ^= 1;
         let fake = SignedCheckpoint::sign(claim, &self.key);
         let ev = Evidence::ConflictingCheckpoints(victim_checkpoint.clone(), fake);
-        self.outbox.push_back(PipeMsg::Evidence(Box::new(ev)));
+        self.outbox
+            .push_back(Outgoing::all(PipeMsg::Evidence(Box::new(ev))));
     }
 
     // ---- recording -------------------------------------------------------------
 
-    pub fn record_my_batch(&mut self, b: &SignedPackedControls) {
+    pub fn record_my_batch(&mut self, b: &SignedEventBatch) {
         if let Ok(bytes) = b.encode() {
             let _ = self
                 .log
@@ -656,8 +695,8 @@ impl Auditor {
         let _ = self.log.append(KIND_CHECKPOINT, c.claim.digest().to_vec());
     }
 
-    /// Opponent batch seen: any overlapping, disagreeing earlier batch is proof.
-    pub fn observe_batch(&mut self, b: &SignedPackedControls) {
+    /// A peer's batch seen: any overlapping, disagreeing earlier batch is proof.
+    pub fn observe_batch(&mut self, b: &SignedEventBatch) {
         // Signature checks are expensive (ML-DSA), so only batches whose tick ranges overlap
         // are paired; non-overlapping batches cannot conflict.
         let (start, end) = (
@@ -672,7 +711,7 @@ impl Auditor {
                     old.record.start_tick,
                     old.record.start_tick + u64::from(old.record.tick_count),
                 );
-                old.record.player == b.record.player && os < end && start < oe
+                old.record.participant == b.record.participant && os < end && start < oe
             })
             .cloned()
             .collect();
@@ -685,14 +724,15 @@ impl Auditor {
         self.their_batches.push(b.clone());
     }
     pub fn observe_checkpoint(&mut self, c: &SignedCheckpoint) {
-        if c.player != self.other {
+        if !self.peers.contains(&c.signer) {
             return;
         }
         let same_slot: Vec<_> = self
             .their_checkpoints
             .iter()
             .filter(|old| {
-                old.claim.epoch_start == c.claim.epoch_start
+                old.signer == c.signer
+                    && old.claim.epoch_start == c.claim.epoch_start
                     && old.claim.digest() != c.claim.digest()
             })
             .cloned()
@@ -722,7 +762,7 @@ impl Auditor {
         let a = self.log.sign_authenticator(self.ruleset, &self.key);
         self.pin(&a);
         self.stats.authenticators_sent += 1;
-        self.outbox.push_back(PipeMsg::Auth(a));
+        self.outbox.push_back(Outgoing::all(PipeMsg::Auth(a)));
         if self.equivocate_next && !self.log.is_empty() {
             self.equivocate_next = false;
             // A forked history: same position, different head, validly signed.
@@ -735,9 +775,9 @@ impl Auditor {
                 }
             }
             let _ = fork.append(255, b"forked-history".to_vec());
-            self.outbox.push_back(PipeMsg::Auth(
+            self.outbox.push_back(Outgoing::all(PipeMsg::Auth(
                 fork.sign_authenticator(self.ruleset, &self.key),
-            ));
+            )));
         }
         // Keep storage bounded without ever dropping entries an open challenge needs.
         self.log.prune_to_keep(LOG_KEEP);
@@ -746,8 +786,8 @@ impl Auditor {
     /// Advance logical time: retransmit, suspect, release pins.
     pub fn tick(&mut self, now: u64) {
         self.now = self.now.max(now);
-        if self.anchor_pending && self.anchor.opponent.is_none() && now % 120 == 0 {
-            self.outbox.push_back(PipeMsg::AnchorReq); // peer may not have been connected yet
+        if self.anchor_pending && self.anchor.answers.len() < self.anchor_quorum && now % 120 == 0 {
+            self.outbox.push_back(Outgoing::all(PipeMsg::AnchorReq)); // a peer may not have been connected yet
         }
         self.finish_anchor_check();
         let expired: Vec<Digest> = self
@@ -764,9 +804,7 @@ impl Auditor {
             }
         }
         self.book.poll(now);
-        while let Some(c) = self.book.poll_outbox() {
-            self.outbox.push_back(PipeMsg::Challenge(c));
-        }
+        self.drain_challenges();
         while let Some((id, status)) = self.book.poll_change() {
             if status == Status::Cleared {
                 self.stats.cleared += 1;
@@ -782,8 +820,7 @@ impl Auditor {
     fn kind_of(&self, id: &Digest) -> ChallengeKind {
         self.kinds
             .get(id)
-            .copied()
-            .unwrap_or(ChallengeKind::Ack { seq: 0 })
+            .map_or(ChallengeKind::Ack { seq: 0 }, |(kind, _)| *kind)
     }
 
     // ---- inbound ---------------------------------------------------------------
@@ -798,10 +835,10 @@ impl Auditor {
                         evidence,
                     });
                     if announce {
-                        // Evidence propagation: the other side (and any witness) can
+                        // Evidence propagation: every other participant (and any witness) can
                         // verify it independently, so relaying cannot frame anyone.
                         self.outbox
-                            .push_back(PipeMsg::Evidence(Box::new(e.clone())));
+                            .push_back(Outgoing::all(PipeMsg::Evidence(Box::new(e.clone()))));
                     }
                 }
             }
@@ -815,26 +852,27 @@ impl Auditor {
 
     /// Handle one accountability message. Anything unauthenticated, malformed,
     /// replayed or over a limit is dropped without a verdict.
-    pub fn on_msg(&mut self, msg: PipeMsg, now: u64, app: &dyn Answers) {
+    pub fn on_msg(&mut self, from: ParticipantId, msg: PipeMsg, now: u64, app: &dyn Answers) {
         match msg {
-            PipeMsg::Auth(a) => self.on_auth(a, now),
-            PipeMsg::Challenge(c) => self.on_challenge(c, now, app),
-            PipeMsg::Response(r) => self.on_response(r, app),
+            PipeMsg::Auth(a) if a.owner == from => self.on_auth(a, now),
+            PipeMsg::Challenge(c) if c.challenger == from => self.on_challenge(c, now, app),
+            PipeMsg::Response(r) if r.responder == from => self.on_response(r, app),
             PipeMsg::Evidence(e) => {
                 // Never trust the sender: verify, then record (no re-announce: no ping-pong).
                 self.submit(&e, false);
             }
-            PipeMsg::AnchorReq => {
-                let held = self.pins.highest(self.other).cloned();
-                self.outbox.push_back(PipeMsg::Anchor(held));
+            PipeMsg::AnchorReq if self.peers.contains(&from) => {
+                let held = self.pins.highest(from).cloned();
+                self.outbox
+                    .push_back(Outgoing::to(from, PipeMsg::Anchor(held)));
             }
-            PipeMsg::Anchor(a) => self.on_anchor(a),
+            PipeMsg::Anchor(a) => self.on_anchor(from, a),
             _ => {}
         }
     }
 
     fn on_auth(&mut self, a: Authenticator, now: u64) {
-        if a.owner != self.other
+        if !self.peers.contains(&a.owner)
             || a.match_id != self.match_id
             || a.ruleset != self.ruleset
             || a.verify().is_err()
@@ -843,7 +881,8 @@ impl Auditor {
         }
         self.stats.authenticators_seen += 1;
         self.pin(&a);
-        if let Some(prev) = self.seen.get(&a.seq) {
+        let owner = a.owner;
+        if let Some(prev) = self.seen.get(&(owner, a.seq)) {
             if prev.head != a.head {
                 let ev = Evidence::ConflictingAuthenticators(prev.clone(), a);
                 self.submit(&ev, true);
@@ -853,13 +892,18 @@ impl Auditor {
         if self.seen.len() >= MAX_SEEN_AUTH {
             self.seen.pop_first();
         }
-        self.seen.insert(a.seq, a.clone());
-        self.auth_count += 1;
-        match self.checked.clone() {
-            None => self.checked = Some(a),
-            Some(base) if a.seq > base.seq && self.auth_count % AUDIT_EVERY == 0 => {
+        self.seen.insert((owner, a.seq), a.clone());
+        let count = self.auth_count.entry(owner).or_insert(0);
+        *count += 1;
+        let audit_due = *count % AUDIT_EVERY == 0;
+        match self.checked.get(&owner).cloned() {
+            None => {
+                self.checked.insert(owner, a);
+            }
+            Some(base) if a.seq > base.seq && audit_due => {
                 if a.seq - base.seq <= crate::audit::log::MAX_SEGMENT_ENTRIES as u64 {
                     self.issue(
+                        owner,
                         ChallengeKind::LogSegment {
                             from: base.seq,
                             to: a.seq,
@@ -868,7 +912,7 @@ impl Auditor {
                     );
                 } else {
                     // Too far to audit in one segment: adopt as the new baseline.
-                    self.checked = Some(a);
+                    self.checked.insert(owner, a);
                 }
             }
             Some(_) => {}
@@ -877,7 +921,7 @@ impl Auditor {
 
     fn on_challenge(&mut self, c: Challenge, now: u64, app: &dyn Answers) {
         let from_witness = self.witnesses.contains(&c.challenger);
-        if (c.challenger != self.other && !from_witness) || now < self.withhold_until {
+        if (!self.peers.contains(&c.challenger) && !from_witness) || now < self.withhold_until {
             return;
         }
         if !self.recovery.may_sign() || self.gate.accept(&c, now).is_err() {
@@ -911,25 +955,27 @@ impl Auditor {
                     self.witness_responses.push_back(r);
                 }
             } else {
-                self.outbox.push_back(PipeMsg::Response(r));
+                self.outbox
+                    .push_back(Outgoing::to(c.challenger, PipeMsg::Response(r)));
             }
         }
     }
 
     fn on_response(&mut self, r: Response, app: &dyn Answers) {
-        let Some(kind) = self.kinds.get(&r.challenge_id).copied() else {
+        let Some((kind, other)) = self.kinds.get(&r.challenge_id).copied() else {
             return;
         };
-        let other = self.other;
-        let checked = self.checked.clone();
+        let checked = self.checked.get(&other).cloned();
         let seen = self.seen.clone();
         let fork: RefCell<Option<Evidence>> = RefCell::new(None);
         let adopt: RefCell<Option<Authenticator>> = RefCell::new(None);
         let result = self.book.on_response(&r, |c, payload| match kind {
             ChallengeKind::LogSegment { from, to } => {
-                let (Ok(seg), Some(base), Some(end)) =
-                    (Segment::decode(payload), checked.as_ref(), seen.get(&to))
-                else {
+                let (Ok(seg), Some(base), Some(end)) = (
+                    Segment::decode(payload),
+                    checked.as_ref(),
+                    seen.get(&(other, to)),
+                ) else {
                     return false;
                 };
                 if seg.owner != other
@@ -955,9 +1001,9 @@ impl Auditor {
                 true
             }
             ChallengeKind::MissingBatch { start_tick } => {
-                SignedPackedControls::decode(payload).ok().is_some_and(|b| {
+                SignedEventBatch::decode(payload).ok().is_some_and(|b| {
                     b.verify().is_ok()
-                        && b.record.player == other
+                        && b.record.participant == other
                         && b.record.start_tick == start_tick
                 })
             }
@@ -967,7 +1013,7 @@ impl Auditor {
             _ => app.check(c, payload),
         });
         if let Some(a) = adopt.into_inner() {
-            self.checked = Some(a);
+            self.checked.insert(other, a);
         }
         if let Some(ev) = fork.into_inner() {
             self.submit(&ev, true);

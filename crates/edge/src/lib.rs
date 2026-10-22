@@ -1,5 +1,5 @@
-//! Independently replayable, public-state two-player verification, without validators.
-//! Checkpoint co-signing is bilateral admission, not Byzantine consensus or finality.
+//! Independently replayable, public-state multi-party verification, without validators.
+//! Checkpoint certification is policy-defined admission, not Byzantine consensus or finality.
 #![forbid(unsafe_code)]
 mod admission;
 pub mod audit;
@@ -22,15 +22,19 @@ pub use checkpoint::{
     evidence_violations, verify_checkpoint_evidence, verify_checkpoint_evidence_with, Checkpoint,
     CheckpointError, CheckpointEvidence, EvidenceVerdict, SignedCheckpoint,
 };
-pub use gv_replay::{ActionOrdering, RuleError, StateMachine, ViolationCode};
+pub use gv_replay::{
+    ActionOrdering, InputViolation, ReplayError, RuleError, StateMachine, ViolationCode,
+};
 pub use history::CertifiedEpoch;
-pub use replica::{apply_tick, EdgeError, Epoch, InputViolation, MatchReplica};
+pub use replica::{EdgeError, Epoch, MatchReplica};
+#[cfg(test)]
+mod fixtures;
 #[cfg(test)]
 mod tests;
 
 pub use admission::{
-    verify_equivocation, AdmissionError, BatchCommitment, BilateralAdmission,
-    SignedBatchCommitment, SignedEpochLock,
+    verify_equivocation, AdmissionError, BatchCommitment, EpochAdmission, SignedBatchCommitment,
+    SignedEpochLock,
 };
 pub use recovery::{ArchiveBuilder, CertifiedMatch, Dispute};
 

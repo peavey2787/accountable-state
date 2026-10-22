@@ -3,7 +3,7 @@
 use crate::audit::{AuditLog, Authenticator, ChallengeKind, Evidence, Status};
 use crate::testkit::GridRules;
 use crate::witness::{Event, Msg, Remote, WitnessNode};
-use gv_core::PlayerId;
+use gv_core::{ParticipantId, Session};
 use gv_sig::SigningKey;
 use std::collections::{BTreeSet, VecDeque};
 
@@ -46,15 +46,19 @@ fn cast(witnesses: usize) -> Cast {
     }
 }
 
+impl Cast {
+    fn session(&self) -> Session {
+        Session::unanimous(M, &[self.keys[0].id(), self.keys[1].id()]).unwrap()
+    }
+}
+
 fn sim(c: &Cast, loss: u64, dup: u64, jitter: u64) -> Sim {
-    let mut roster = [c.keys[0].id(), c.keys[1].id()];
-    roster.sort();
-    let wids: Vec<PlayerId> = c.keys[2..].iter().map(SigningKey::id).collect();
-    let rules = GridRules::new(roster);
+    let wids: Vec<ParticipantId> = c.keys[2..].iter().map(SigningKey::id).collect();
+    let rules = GridRules;
     let mut nodes: Vec<_> = c
         .keys
         .iter()
-        .map(|k| WitnessNode::new(k.clone(), M, roster, &wids, rules.clone()))
+        .map(|k| WitnessNode::new(k.clone(), c.session(), &wids, rules))
         .collect();
     // Bipartite links: every witness to both players.
     for w in 2..c.keys.len() {
@@ -138,13 +142,8 @@ fn equivocation(c: &Cast, who: usize) -> Evidence {
     x.append(1, vec![1]).unwrap();
     let mut y = a;
     y.append(1, vec![2]).unwrap();
-    let rs = GridRules::new({
-        let mut r = [c.keys[0].id(), c.keys[1].id()];
-        r.sort();
-        r
-    });
     use gv_replay::StateMachine;
-    let r = rs.ruleset_hash();
+    let r = GridRules.ruleset_hash();
     Evidence::ConflictingAuthenticators(x.sign_authenticator(r, k), y.sign_authenticator(r, k))
 }
 
@@ -186,12 +185,7 @@ fn malicious_witness_cannot_forge_a_verdict() {
         .map_or([0u8; 32], |x| x.ruleset);
     let _ = r;
     use gv_replay::StateMachine;
-    let ruleset = GridRules::new({
-        let mut x = [c.keys[0].id(), c.keys[1].id()];
-        x.sort();
-        x
-    })
-    .ruleset_hash();
+    let ruleset = GridRules.ruleset_hash();
     let (mut fa, mut fb) = (
         a.sign_authenticator(ruleset, atk),
         b.sign_authenticator(ruleset, atk),
@@ -239,10 +233,7 @@ fn unpinned_or_unadmitted_links_cannot_inject_anything() {
     let mut s = sim(&c, 0, 0, 10);
     // An extra, unpinned witness key tries to talk to player 0 on a fresh link.
     let rogue = SigningKey::from_seed([99; 32]);
-    let mut roster = [c.keys[0].id(), c.keys[1].id()];
-    roster.sort();
-    let rules = GridRules::new(roster);
-    let mut r = WitnessNode::new(rogue.clone(), M, roster, &[rogue.id()], rules);
+    let mut r = WitnessNode::new(rogue.clone(), c.session(), &[rogue.id()], GridRules);
     r.open_link(0, Remote::Player(c.keys[0].id()), 0);
     s.nodes[0].open_link(9, Remote::AnyWitness, 0);
     let (_, hello) = r.poll_out().unwrap();
@@ -321,10 +312,8 @@ fn witness_audits_a_player_log_and_silence_is_never_proof() {
     let mut s = sim(&c, 0, 0, 10);
     s.run(20);
     let p = c.keys[0].clone();
-    let mut roster = [c.keys[0].id(), c.keys[1].id()];
-    roster.sort();
     use gv_replay::StateMachine;
-    let ruleset = GridRules::new(roster).ruleset_hash();
+    let ruleset = GridRules.ruleset_hash();
     let mut log = AuditLog::new(M, p.id());
     for i in 0..6u8 {
         log.append(1, vec![i]).unwrap();

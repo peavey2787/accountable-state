@@ -1,11 +1,15 @@
-//! Reliable pipeline messages exchanged between the two players.
+//! Reliable pipeline messages exchanged between the participants of one session.
 use crate::audit::{Authenticator, Challenge, Evidence, Response};
 use crate::{SignedBatchCommitment, SignedCheckpoint, SignedEpochLock};
-use gv_codec::SignedPackedControls;
-use gv_core::{MatchId, PlayerId};
+use gv_codec::SignedEventBatch;
+use gv_core::{MatchId, ParticipantId, MAX_PARTICIPANTS};
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 
-const HIDE_LABEL: &str = "gv/live-hide/v1";
+const SEAL_LABEL: &str = "gv/live-seal/v2";
+
+fn malformed<E>(_: E) -> PipeError {
+    PipeError::Malformed
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PipeError {
@@ -13,23 +17,52 @@ pub enum PipeError {
     BadSignature,
 }
 
-/// A player announces that their location is hidden for a fixed window.
-/// Signed, so it cannot be forged or silently shortened by the opponent.
+/// Where the transport delivers a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dest {
+    /// Every other participant.
+    All,
+    /// One participant (a challenge, its answer, an anchor request).
+    Peer(ParticipantId),
+}
+
+/// A message plus its destination. The transport authenticates the link, so the receiver learns
+/// the sender from the connection and passes it to [`crate::live::Pipeline::on_message`].
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub to: Dest,
+    pub msg: PipeMsg,
+}
+
+impl Outgoing {
+    pub fn all(msg: PipeMsg) -> Self {
+        Self { to: Dest::All, msg }
+    }
+    pub fn to(peer: ParticipantId, msg: PipeMsg) -> Self {
+        Self {
+            to: Dest::Peer(peer),
+            msg,
+        }
+    }
+}
+
+/// A participant announces that their inputs are sealed for a fixed window. Signed, so it
+/// cannot be forged or silently shortened by anyone else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SignedHide {
+pub struct SignedSeal {
     pub match_id: MatchId,
-    pub player: PlayerId,
+    pub owner: ParticipantId,
     pub start_tick: u64,
     pub ticks: u32,
     pub nonce: [u8; 16],
     pub signature: Signature,
 }
-impl SignedHide {
+impl SignedSeal {
     pub const SIZE: usize = 32 + 32 + 8 + 4 + 16 + SIG_LEN;
     fn message(&self) -> Vec<u8> {
         let mut m = Vec::new();
         m.extend_from_slice(&self.match_id);
-        m.extend_from_slice(&self.player);
+        m.extend_from_slice(&self.owner);
         m.extend_from_slice(&self.start_tick.to_le_bytes());
         m.extend_from_slice(&self.ticks.to_le_bytes());
         m.extend_from_slice(&self.nonce);
@@ -44,26 +77,21 @@ impl SignedHide {
     ) -> Self {
         let mut s = Self {
             match_id,
-            player: key.id(),
+            owner: key.id(),
             start_tick,
             ticks,
             nonce,
             signature: Signature::zero(),
         };
-        s.signature = key.sign(HIDE_LABEL, &s.message());
+        s.signature = key.sign(SEAL_LABEL, &s.message());
         s
     }
     pub fn verify(&self) -> Result<(), PipeError> {
-        gv_sig::verify(&self.player, HIDE_LABEL, &self.message(), &self.signature)
+        gv_sig::verify(&self.owner, SEAL_LABEL, &self.message(), &self.signature)
             .map_err(|_| PipeError::BadSignature)
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(Self::SIZE);
-        b.extend_from_slice(&self.match_id);
-        b.extend_from_slice(&self.player);
-        b.extend_from_slice(&self.start_tick.to_le_bytes());
-        b.extend_from_slice(&self.ticks.to_le_bytes());
-        b.extend_from_slice(&self.nonce);
+        let mut b = self.message();
         b.extend_from_slice(self.signature.as_bytes());
         b
     }
@@ -74,7 +102,7 @@ impl SignedHide {
         let arr = |p: usize| -> [u8; 32] { b[p..p + 32].try_into().unwrap_or([0; 32]) };
         let s = Self {
             match_id: arr(0),
-            player: arr(32),
+            owner: arr(32),
             start_tick: u64::from_le_bytes(b[64..72].try_into().unwrap_or([0; 8])),
             ticks: u32::from_le_bytes(b[72..76].try_into().unwrap_or([0; 4])),
             nonce: b[76..92].try_into().unwrap_or([0; 16]),
@@ -85,24 +113,91 @@ impl SignedHide {
     }
 }
 
-/// Opening of a hidden-window commitment: the signed batch and its secret blind.
+/// Opening of a sealed-window commitment: the signed batch and its secret blind.
 #[derive(Clone, Debug)]
 pub struct Opening {
-    pub batch: SignedPackedControls,
+    pub batch: SignedEventBatch,
     pub blind: [u8; 32],
+}
+
+/// The coordinator's decision about which batches an epoch contains when some participants have
+/// not answered in time. It carries the participants' own signed batches, so it cannot invent
+/// input; it can only choose the subset, and a different choice yields a different checkpoint
+/// that honest signers will not co-sign.
+#[derive(Clone, Debug)]
+pub struct Close {
+    pub epoch_start: u64,
+    pub tick_count: u32,
+    /// Coordinator rotation step this decision belongs to.
+    pub attempt: u8,
+    pub batches: Vec<SignedEventBatch>,
+}
+impl Close {
+    fn encode(&self) -> Result<Vec<u8>, PipeError> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.epoch_start.to_le_bytes());
+        out.extend_from_slice(&self.tick_count.to_le_bytes());
+        out.push(self.attempt);
+        out.extend_from_slice(&(self.batches.len() as u16).to_le_bytes());
+        for b in &self.batches {
+            let bytes = b.encode().map_err(|_| PipeError::Malformed)?;
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&bytes);
+        }
+        Ok(out)
+    }
+    fn decode(b: &[u8]) -> Result<Self, PipeError> {
+        let bad = || PipeError::Malformed;
+        let head = b.get(..15).ok_or_else(bad)?;
+        let epoch_start = u64::from_le_bytes(head[..8].try_into().map_err(|_| bad())?);
+        let tick_count = u32::from_le_bytes(head[8..12].try_into().map_err(|_| bad())?);
+        let attempt = head[12];
+        let count = usize::from(u16::from_le_bytes([head[13], head[14]]));
+        if count > MAX_PARTICIPANTS {
+            return Err(bad());
+        }
+        let mut rest = &b[15..];
+        let mut batches = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len_bytes: [u8; 4] = rest
+                .get(..4)
+                .ok_or_else(bad)?
+                .try_into()
+                .map_err(|_| bad())?;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            let end = 4usize.checked_add(len).ok_or_else(bad)?;
+            let body = rest.get(4..end).ok_or_else(bad)?;
+            batches.push(SignedEventBatch::decode(body).map_err(|_| bad())?);
+            rest = &rest[end..];
+        }
+        if !rest.is_empty() {
+            return Err(bad());
+        }
+        Ok(Self {
+            epoch_start,
+            tick_count,
+            attempt,
+            batches,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum PipeMsg {
     /// Signed epoch input batch (public play).
-    Batch(SignedPackedControls),
+    Batch(SignedEventBatch),
     Checkpoint(SignedCheckpoint),
-    /// Hidden window: signed commitment to a batch that stays secret for now.
+    /// Sealed window: signed commitment to a batch that stays secret for now.
     Commit(SignedBatchCommitment),
-    Lock(SignedEpochLock),
+    /// `start_tick` routes the lock to its cell; the lock's root binds the commitment set.
+    Lock {
+        start_tick: u64,
+        lock: SignedEpochLock,
+    },
     /// Opens a committed batch.
     Reveal(Opening),
-    Hide(SignedHide),
+    Seal(SignedSeal),
+    Close(Close),
     /// Signed log head, once per epoch (accountability, never blocks play).
     Auth(Authenticator),
     Challenge(Challenge),
@@ -120,22 +215,27 @@ pub enum PipeMsg {
 impl PipeMsg {
     pub fn encode(&self) -> Result<Vec<u8>, PipeError> {
         let (tag, body) = match self {
-            Self::Batch(b) => (1u8, b.encode().map_err(|_| PipeError::Malformed)?),
+            Self::Batch(b) => (1u8, b.encode().map_err(malformed)?),
             Self::Checkpoint(c) => (2, c.encode()),
             Self::Commit(c) => (3, c.encode()),
-            Self::Lock(l) => (4, l.encode()),
+            Self::Lock { start_tick, lock } => {
+                let mut body = start_tick.to_le_bytes().to_vec();
+                body.extend_from_slice(&lock.encode());
+                (4, body)
+            }
             Self::Reveal(o) => {
                 let mut body = o.blind.to_vec();
-                body.extend_from_slice(&o.batch.encode().map_err(|_| PipeError::Malformed)?);
+                body.extend_from_slice(&o.batch.encode().map_err(malformed)?);
                 (5, body)
             }
-            Self::Hide(h) => (6, h.encode()),
-            Self::Auth(a) => (7, a.encode()),
-            Self::Challenge(c) => (8, c.encode()),
-            Self::Response(r) => (9, r.encode()),
-            Self::Evidence(e) => (10, e.encode().map_err(|_| PipeError::Malformed)?),
-            Self::AnchorReq => (11, Vec::new()),
-            Self::Anchor(a) => (12, a.as_ref().map_or_else(Vec::new, Authenticator::encode)),
+            Self::Seal(h) => (6, h.encode()),
+            Self::Close(c) => (7, c.encode()?),
+            Self::Auth(a) => (8, a.encode()),
+            Self::Challenge(c) => (9, c.encode()),
+            Self::Response(r) => (10, r.encode()),
+            Self::Evidence(e) => (11, e.encode().map_err(malformed)?),
+            Self::AnchorReq => (12, Vec::new()),
+            Self::Anchor(a) => (13, a.as_ref().map_or_else(Vec::new, Authenticator::encode)),
         };
         let mut out = Vec::with_capacity(body.len() + 1);
         out.push(tag);
@@ -145,36 +245,34 @@ impl PipeMsg {
     pub fn decode(b: &[u8]) -> Result<Self, PipeError> {
         let (tag, body) = b.split_first().ok_or(PipeError::Malformed)?;
         Ok(match tag {
-            1 => Self::Batch(SignedPackedControls::decode(body).map_err(|_| PipeError::Malformed)?),
-            2 => {
-                Self::Checkpoint(SignedCheckpoint::decode(body).map_err(|_| PipeError::Malformed)?)
-            }
-            3 => {
-                Self::Commit(SignedBatchCommitment::decode(body).map_err(|_| PipeError::Malformed)?)
-            }
-            4 => Self::Lock(SignedEpochLock::decode(body).map_err(|_| PipeError::Malformed)?),
-            5 => {
-                if body.len() < 32 {
-                    return Err(PipeError::Malformed);
+            1 => Self::Batch(SignedEventBatch::decode(body).map_err(malformed)?),
+            2 => Self::Checkpoint(SignedCheckpoint::decode(body).map_err(malformed)?),
+            3 => Self::Commit(SignedBatchCommitment::decode(body).map_err(malformed)?),
+            4 => {
+                let (start, lock) = body.split_at_checked(8).ok_or(PipeError::Malformed)?;
+                Self::Lock {
+                    start_tick: u64::from_le_bytes(
+                        start.try_into().map_err(|_| PipeError::Malformed)?,
+                    ),
+                    lock: SignedEpochLock::decode(lock).map_err(malformed)?,
                 }
-                let (blind, batch) = body.split_at(32);
+            }
+            5 => {
+                let (blind, batch) = body.split_at_checked(32).ok_or(PipeError::Malformed)?;
                 Self::Reveal(Opening {
                     blind: blind.try_into().map_err(|_| PipeError::Malformed)?,
-                    batch: SignedPackedControls::decode(batch).map_err(|_| PipeError::Malformed)?,
+                    batch: SignedEventBatch::decode(batch).map_err(malformed)?,
                 })
             }
-            6 => Self::Hide(SignedHide::decode(body)?),
-            7 => Self::Auth(Authenticator::decode(body).map_err(|_| PipeError::Malformed)?),
-            8 => Self::Challenge(Challenge::decode(body).map_err(|_| PipeError::Malformed)?),
-            9 => Self::Response(Response::decode(body).map_err(|_| PipeError::Malformed)?),
-            10 => Self::Evidence(Box::new(
-                Evidence::decode(body).map_err(|_| PipeError::Malformed)?,
-            )),
-            11 if body.is_empty() => Self::AnchorReq,
-            12 if body.is_empty() => Self::Anchor(None),
-            12 => Self::Anchor(Some(
-                Authenticator::decode(body).map_err(|_| PipeError::Malformed)?,
-            )),
+            6 => Self::Seal(SignedSeal::decode(body)?),
+            7 => Self::Close(Close::decode(body)?),
+            8 => Self::Auth(Authenticator::decode(body).map_err(malformed)?),
+            9 => Self::Challenge(Challenge::decode(body).map_err(malformed)?),
+            10 => Self::Response(Response::decode(body).map_err(malformed)?),
+            11 => Self::Evidence(Box::new(Evidence::decode(body).map_err(malformed)?)),
+            12 if body.is_empty() => Self::AnchorReq,
+            13 if body.is_empty() => Self::Anchor(None),
+            13 => Self::Anchor(Some(Authenticator::decode(body).map_err(malformed)?)),
             _ => return Err(PipeError::Malformed),
         })
     }

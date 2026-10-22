@@ -1,5 +1,6 @@
-use gv_core::{MatchId, PlayerId};
+use gv_core::{ParticipantId, Session};
 use gv_edge::export::DisclosurePolicy;
+use gv_edge::live::PipelineConfig;
 use gv_edge::CertifiedMatch;
 use gv_sig::SigningKey;
 use std::path::{Path, PathBuf};
@@ -31,13 +32,15 @@ impl DurableStorage {
 /// Everything [`crate::AccountableState::open`] needs. There is deliberately no `Default`.
 pub struct Config {
     pub key: SigningKey,
-    pub roster: [PlayerId; 2],
-    pub match_id: MatchId,
-    /// Ticks per certified epoch.
-    pub epoch_ticks: u32,
+    /// Who takes part and how: roster (roles, teams), certification and ordering policies, and
+    /// the application parameters. Every digest and archive binds it.
+    pub session: Session,
+    /// Epoch grid, idle input and the optional close and sealed-window policies. The idle input
+    /// also fixes the byte width of every action passed to [`crate::AccountableState::submit`].
+    pub pipeline: PipelineConfig,
     /// Pinned witnesses. With witnesses, recovery after a restart also waits for their
     /// retained heads (see the anchor trust boundary in docs/39).
-    pub witnesses: Vec<PlayerId>,
+    pub witnesses: Vec<ParticipantId>,
     /// What evidence may disclose; stated by the application, never assumed.
     pub disclosure: DisclosurePolicy,
     /// Certified history to resume from (`GV-CERTIFIED-MATCH/V1`, live engine).

@@ -1,12 +1,13 @@
 //! Trusted crash recovery: anchored restore, rollback/fork refusal, and real-filesystem
 //! corruption, truncation and interrupted-write injection.
 use super::auditor::{AuditEvent, Auditor};
-use super::msg::PipeMsg;
+use super::msg::{Outgoing, PipeMsg};
 use crate::audit::durable::{Durable, Loaded};
 use crate::audit::trust::{
     check_log, read_state, write_state, Pins, Recovery, Refusal, StateRead, Unresolved,
 };
 use crate::audit::{AuditLog, Authenticator, ChallengeKind, Response, Status};
+use gv_core::Roster;
 use gv_sig::SigningKey;
 use std::fs;
 use std::path::PathBuf;
@@ -28,7 +29,8 @@ fn log_of(key: &SigningKey, n: u64, salt: u8) -> AuditLog {
     l
 }
 fn auditor(me: &SigningKey, other: &SigningKey) -> Auditor {
-    let mut a = Auditor::new(me.clone(), [me.id(), other.id()], M, R).unwrap();
+    let roster = Roster::players(&[me.id(), other.id()]).unwrap();
+    let mut a = Auditor::new(me.clone(), &roster, M, R).unwrap();
     a.use_ephemeral_store_for_tests();
     a
 }
@@ -94,7 +96,13 @@ fn no_anchor_is_unresolved_and_suspends_signing_until_an_anchor_arrives() {
     assert!(matches!(au.recovery(), Recovery::Resumed { .. }));
     assert_eq!(au.log().head(), log.head());
     au.on_epoch(2);
-    assert!(matches!(au.poll_msg(), Some(PipeMsg::Auth(_))));
+    assert!(matches!(
+        au.poll_msg(),
+        Some(Outgoing {
+            msg: PipeMsg::Auth(_),
+            ..
+        })
+    ));
     // A contradicting anchor from a peer after the fact does not silently win.
     let mut au2 = auditor(&a, &b);
     au2.restore(Some(log_of(&a, 15, 1)), &[], &[]);
@@ -123,7 +131,13 @@ fn lost_log_with_anchors_is_not_proof_of_cheating_and_does_not_sign() {
     let mut fresh = auditor(&a, &b);
     assert_eq!(fresh.restore(None, &[], &[]).recovery, Recovery::Fresh);
     fresh.on_epoch(1);
-    assert!(matches!(fresh.poll_msg(), Some(PipeMsg::Auth(_))));
+    assert!(matches!(
+        fresh.poll_msg(),
+        Some(Outgoing {
+            msg: PipeMsg::Auth(_),
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -267,7 +281,7 @@ fn pins_survive_restart_and_pinned_opponent_heads_detect_a_later_fork() {
     au.restore(None, std::slice::from_ref(&their_auth), &[]);
     // After restart the opponent presents a different head at the pinned position.
     let forked = log_of(&b, 12, 3).sign_authenticator(R, &b);
-    au.on_msg(PipeMsg::Auth(forked), 5, &super::auditor::NoAnswers);
+    au.on_msg(b.id(), PipeMsg::Auth(forked), 5, &super::auditor::NoAnswers);
     assert_eq!(
         au.ledger().proven_total(),
         1,
@@ -276,7 +290,12 @@ fn pins_survive_restart_and_pinned_opponent_heads_detect_a_later_fork() {
     // Re-presenting the pinned head itself proves nothing.
     let mut au = auditor(&a, &b);
     au.restore(None, std::slice::from_ref(&their_auth), &[]);
-    au.on_msg(PipeMsg::Auth(their_auth), 5, &super::auditor::NoAnswers);
+    au.on_msg(
+        b.id(),
+        PipeMsg::Auth(their_auth),
+        5,
+        &super::auditor::NoAnswers,
+    );
     assert_eq!(au.ledger().proven_total(), 0);
 }
 
@@ -287,14 +306,22 @@ fn open_challenge_survives_restart_and_timeout_is_never_proof() {
     let store = Durable::new(d.join("m"));
     let mut au = auditor(&a, &b);
     au.restore(None, &[], &[]);
-    let id = au.challenge(ChallengeKind::Ack { seq: 0 }, 100).unwrap();
+    let id = au
+        .challenge(b.id(), ChallengeKind::Ack { seq: 0 }, 100)
+        .unwrap();
     store.save_challenges(&au.open_challenges()).unwrap();
     // Restart.
     let mut au2 = auditor(&a, &b);
     au2.restore(None, &[], &[]);
     let cs = store.load_challenges().ok().unwrap();
     assert_eq!(au2.resume_challenges(&cs, 5000), 1);
-    assert!(matches!(au2.poll_msg(), Some(PipeMsg::Challenge(_))));
+    assert!(matches!(
+        au2.poll_msg(),
+        Some(Outgoing {
+            msg: PipeMsg::Challenge(_),
+            ..
+        })
+    ));
     // Silence only ever suspects, then marks unavailable; never fraud.
     for t in (5000..9000).step_by(10) {
         au2.tick(t);
@@ -317,7 +344,12 @@ fn open_challenge_survives_restart_and_timeout_is_never_proof() {
     let ch = cs.iter().find(|c| c.id() == id).unwrap();
     let ack = log_of(&b, 3, 0).sign_authenticator(R, &b).encode();
     let resp = Response::sign(ch, ack, &b);
-    au3.on_msg(PipeMsg::Response(resp), 1, &super::auditor::NoAnswers);
+    au3.on_msg(
+        b.id(),
+        PipeMsg::Response(resp),
+        1,
+        &super::auditor::NoAnswers,
+    );
     assert!(matches!(
         au3.poll_event(),
         Some(AuditEvent::Challenge {

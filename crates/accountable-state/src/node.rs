@@ -4,10 +4,10 @@ use crate::io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, Wi
 use crate::own::OwnInputs;
 use crate::persist::{Persistence, Sink};
 use crate::view::{AuthorizedView, ObserverRole, ViewPolicy};
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, ParticipantId, Session};
 use gv_edge::export::{export_audit, export_match, DisclosurePolicy, ExportError};
 use gv_edge::feed::SignedEvent;
-use gv_edge::live::{HideError, PipeEvent, PipeMsg, Pipeline, PipelineConfig};
+use gv_edge::live::{PipeEvent, PipeMsg, Pipeline, SealError};
 use gv_edge::CertifiedMatch;
 use gv_replay::{ActionOrdering, StateMachine};
 use std::collections::VecDeque;
@@ -27,16 +27,15 @@ pub struct StateView<'a> {
     pub anchor_check_pending: bool,
 }
 
-/// One participant of an accountable two-party state machine. Sans-IO: the application feeds it
+/// One participant of an accountable state machine shared by a roster. Sans-IO: the application feeds it
 /// local actions and received bytes, and drains [`AccountableState::poll`].
 pub struct AccountableState<M: StateMachine + Clone> {
     pub(crate) pipe: Pipeline<M>,
     machine: M,
-    match_id: MatchId,
-    roster: [PlayerId; 2],
+    session: Session,
     disclosure: DisclosurePolicy,
     witnesses: bool,
-    hide_cooldown_ticks: u64,
+    width: usize,
     #[cfg(feature = "fault-injection")]
     pub(crate) epoch_ticks: u32,
     pub(crate) now: u64,
@@ -62,24 +61,14 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             ));
         }
         let replica = receipts
-            .restore(config.match_id, config.roster, machine.clone())
+            .restore(config.session.clone(), machine.clone())
             .map_err(|e| OpenError::Recovery(format!("{e:?}")))?;
         let start = replica.next_tick();
-        let pipe_cfg = PipelineConfig {
-            #[cfg(feature = "fault-injection")]
-            epoch_ticks: config.epoch_ticks,
-            ..PipelineConfig::default()
-        };
-        let hide_cooldown_ticks = pipe_cfg.hide_cooldown_ticks;
-        let mut pipe = Pipeline::new(
-            config.key.clone(),
-            config.roster,
-            config.match_id,
-            machine.clone(),
-            replica,
-            pipe_cfg,
-        )
-        .ok_or(OpenError::NotInRoster)?;
+        let width = config.pipeline.idle_input.len();
+        #[cfg(feature = "fault-injection")]
+        let epoch_ticks = config.pipeline.epoch_ticks;
+        let mut pipe = Pipeline::new(config.key.clone(), replica, config.pipeline)
+            .ok_or(OpenError::NotInRoster)?;
         for w in &config.witnesses {
             pipe.auditor_mut().admit_witness(*w);
         }
@@ -102,13 +91,12 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         Ok(Self {
             pipe,
             machine,
-            match_id: config.match_id,
-            roster: config.roster,
+            session: config.session,
             disclosure: config.disclosure,
             witnesses,
-            hide_cooldown_ticks,
+            width,
             #[cfg(feature = "fault-injection")]
-            epoch_ticks: config.epoch_ticks,
+            epoch_ticks,
             now: start,
             own: OwnInputs::new(start),
             checkpoint: None,
@@ -120,34 +108,39 @@ impl<M: StateMachine + Clone> AccountableState<M> {
 
     /// Execute one local action at the next tick and propagate it. Returns that tick. An action
     /// the machine says needs a global order is refused: it could never be made final here.
-    pub fn submit(&mut self, action: u16) -> Result<u64, SubmitError> {
+    pub fn submit(&mut self, action: &[u8]) -> Result<u64, SubmitError> {
+        if action.len() != self.width {
+            return Err(SubmitError::WrongWidth {
+                expected: self.width,
+            });
+        }
         if self.machine.ordering(action) == ActionOrdering::RequiresExternalOrdering {
             return Err(SubmitError::RequiresExternalOrdering);
         }
         let tick = self.now;
-        self.own.push(action);
+        self.own.push(action.to_vec());
         self.now += 1;
         self.drive(|pipe, now, own| pipe.tick(now, own));
         Ok(tick)
     }
 
-    /// Bytes from the opponent's reliable pipeline or from the local witness service.
+    /// Bytes from a member's reliable pipeline or from a pinned witness service.
     pub fn receive(&mut self, from: Peer, bytes: &[u8]) -> Result<(), ReceiveError> {
         let msg = PipeMsg::decode(bytes).map_err(|_| ReceiveError::Malformed)?;
         match (from, msg) {
-            (Peer::Opponent, msg) => {
+            (Peer::Member(id), msg) => {
                 if let PipeMsg::Auth(a) = &msg {
                     self.queue_for_witness(WitnessOut::Auth(a.clone()));
                 }
-                self.drive(|pipe, now, own| pipe.on_message(msg, now, own));
+                self.drive(|pipe, now, own| pipe.on_message(id, msg, now, own));
             }
-            (Peer::Witness, PipeMsg::Anchor(Some(a))) => {
+            (Peer::Witness(_), PipeMsg::Anchor(Some(a))) => {
                 self.pipe.auditor_mut().on_witness_anchor(&a);
             }
-            (Peer::Witness, msg @ PipeMsg::Challenge(_)) => {
-                self.drive(|pipe, now, own| pipe.on_message(msg, now, own));
+            (Peer::Witness(id), msg @ PipeMsg::Challenge(_)) => {
+                self.drive(|pipe, now, own| pipe.on_message(id, msg, now, own));
             }
-            (Peer::Witness, _) => return Err(ReceiveError::NotAllowedFromWitness),
+            (Peer::Witness(_), _) => return Err(ReceiveError::NotAllowedFromWitness),
         }
         Ok(())
     }
@@ -184,13 +177,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         let package = match query {
             ExportQuery::MatchArchive => {
                 let archive = self.persist.archive().ok_or(ExportError::Invalid)?;
-                export_match(
-                    &self.machine,
-                    self.match_id,
-                    self.roster,
-                    &archive,
-                    self.disclosure,
-                )?
+                export_match(&self.machine, &self.session, &archive, self.disclosure)?
             }
             ExportQuery::Fraud(id) => {
                 let bytes = self
@@ -201,8 +188,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             }
             ExportQuery::Audit => export_audit(
                 &self.machine,
-                self.match_id,
-                self.roster,
+                &self.session,
                 &self.persist.audit(&self.pipe),
                 self.disclosure,
             )?,
@@ -214,23 +200,24 @@ impl<M: StateMachine + Clone> AccountableState<M> {
     pub fn view<P: ViewPolicy>(
         &self,
         policy: &P,
-        observer: &PlayerId,
+        observer: &ParticipantId,
         role: ObserverRole,
     ) -> Result<AuthorizedView, String> {
         policy.view_for(self.pipe.verified_state(), observer, role)
     }
 
-    /// Advanced: schedule a hidden window (inputs committed now, revealed later).
-    pub fn request_hide(&mut self) -> Result<(), HideError> {
+    /// Optional: keep this participant's inputs sealed for the configured window (committed
+    /// now, revealed after it). Refused unless the pipeline configuration has a seal policy.
+    pub fn request_seal(&mut self) -> Result<(), SealError> {
         let now = self.now;
-        self.pipe.request_hide(now)?;
+        self.pipe.request_seal(now)?;
         self.drive(|pipe, now, own| pipe.tick(now, own));
         Ok(())
     }
 
-    /// Advanced: ticks between two hide requests.
-    pub fn hide_cooldown_ticks(&self) -> u64 {
-        self.hide_cooldown_ticks
+    /// First tick at which this participant may request another sealed window.
+    pub fn seal_cooldown_until(&self) -> u64 {
+        self.pipe.seal_cooldown_until()
     }
 
     /// Write anything buffered (the certified archive) before shutdown.
@@ -245,7 +232,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
 
     pub(crate) fn drive(
         &mut self,
-        step: impl FnOnce(&mut Pipeline<M>, u64, &dyn Fn(u64, u64) -> Option<Vec<u16>>),
+        step: impl FnOnce(&mut Pipeline<M>, u64, &dyn Fn(u64, u64) -> Option<Vec<Vec<u8>>>),
     ) {
         let own = &self.own;
         step(&mut self.pipe, self.now, &|from, to| own.range(from, to));
@@ -260,8 +247,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
     fn drain_pipeline(&mut self, now: Instant) {
         let cx = Context {
             machine: &self.machine,
-            match_id: self.match_id,
-            roster: self.roster,
+            session: &self.session,
             disclosure: self.disclosure,
         };
         while let Some(ev) = self.pipe.poll_event() {
@@ -299,12 +285,12 @@ impl<M: StateMachine + Clone> AccountableState<M> {
     }
 
     fn next_message(&mut self) -> Option<Output> {
-        let m = self.pipe.poll_outbox()?;
-        if let PipeMsg::Auth(a) = &m {
+        let out = self.pipe.poll_outbox()?;
+        if let PipeMsg::Auth(a) = &out.msg {
             self.queue_for_witness(WitnessOut::Auth(a.clone()));
         }
-        match m.encode() {
-            Ok(bytes) => Some(Output::Send(Outgoing::Opponent(bytes))),
+        match out.msg.encode() {
+            Ok(bytes) => Some(Output::Send(Outgoing::Member { to: out.to, bytes })),
             Err(e) => Some(Output::Event(PipeEvent::Fault(format!(
                 "encode failed: {e:?}"
             )))),

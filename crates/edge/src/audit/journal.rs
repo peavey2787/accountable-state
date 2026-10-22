@@ -18,7 +18,7 @@ use super::failpoint;
 use super::fsync::sync_parent_dir;
 use super::log::{AuditLog, Authenticator};
 use super::store::RecordFile;
-use gv_core::{MatchId, PlayerId};
+use gv_core::{MatchId, ParticipantId};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ pub struct FileTrustStore {
     wal_path: PathBuf,
     wal: RecordFile,
     match_id: MatchId,
-    owner: PlayerId,
+    owner: ParticipantId,
     committed_len: u64,
     committed_head: u64,
     recent_heads: Vec<Authenticator>,
@@ -62,7 +62,7 @@ pub struct FileTrustStore {
     compact_at: u64,
 }
 
-fn header(match_id: &MatchId, owner: &PlayerId) -> Vec<u8> {
+fn header(match_id: &MatchId, owner: &ParticipantId) -> Vec<u8> {
     let mut r = vec![T_HEADER];
     r.extend_from_slice(match_id);
     r.extend_from_slice(owner);
@@ -90,7 +90,7 @@ impl FileTrustStore {
     pub fn open(
         base: impl Into<PathBuf>,
         match_id: MatchId,
-        owner: PlayerId,
+        owner: ParticipantId,
     ) -> io::Result<(Self, LoadedTrust)> {
         let base: PathBuf = base.into();
         let snapshot = Durable::new(&base);

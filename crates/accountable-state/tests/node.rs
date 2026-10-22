@@ -1,7 +1,8 @@
 use accountable_state::identity::SigningKey;
+use accountable_state::session::Session;
 use accountable_state::{
-    AccountableState, ActionOrdering, Config, DisclosurePolicy, DurableStorage, Event, ExportEvent,
-    ExportQuery, OpenError, Outgoing, Output, Peer, PlayerId, ReceiveError, RuleError,
+    AccountableState, ActionOrdering, Config, Dest, DisclosurePolicy, DurableStorage, Event,
+    ExportQuery, OpenError, Outgoing, Output, Peer, PipelineConfig, ReceiveError, RuleError,
     StateMachine, SubmitError, TrustAnchor, VerificationResult, Verifier,
 };
 use gv_edge::live::PipeMsg;
@@ -10,17 +11,19 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const MATCH: [u8; 32] = [9; 32];
+const PLAYERS: usize = 3;
 
-fn keys() -> [SigningKey; 2] {
-    [
-        SigningKey::from_seed([1; 32]),
-        SigningKey::from_seed([2; 32]),
-    ]
+fn keys() -> Vec<SigningKey> {
+    (0..PLAYERS as u8)
+        .map(|i| SigningKey::from_seed([1 + i; 32]))
+        .collect()
 }
-fn roster() -> [PlayerId; 2] {
-    let mut r = keys().map(|k| k.id());
-    r.sort();
-    r
+fn session() -> Session {
+    let ids: Vec<_> = keys().iter().map(SigningKey::id).collect();
+    Session::unanimous(MATCH, &ids).unwrap()
+}
+fn controls(c: u16) -> [u8; 2] {
+    c.to_le_bytes()
 }
 fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("accountable-state-{name}-{}", std::process::id()));
@@ -31,41 +34,45 @@ fn scratch(name: &str) -> PathBuf {
 fn config(key: SigningKey, storage: DurableStorage) -> Config {
     Config {
         key,
-        roster: roster(),
-        match_id: MATCH,
-        epoch_ticks: 20,
+        session: session(),
+        pipeline: PipelineConfig::new(controls(0).to_vec()),
         witnesses: Vec::new(),
         disclosure: DisclosurePolicy::PUBLIC,
         resume: None,
         storage,
     }
 }
-fn open_pair<M: StateMachine + Clone>(
+fn open_all<M: StateMachine + Clone>(
     machine: &M,
     dir: &std::path::Path,
-) -> [AccountableState<M>; 2] {
-    keys().map(|k| {
-        let storage = DurableStorage::at(dir.join(hex(&k.id()[..4])));
-        AccountableState::open(machine.clone(), config(k, storage)).unwrap()
-    })
+) -> Vec<AccountableState<M>> {
+    keys()
+        .into_iter()
+        .map(|k| {
+            let storage = DurableStorage::at(dir.join(hex(&k.id()[..4])));
+            AccountableState::open(machine.clone(), config(k, storage)).unwrap()
+        })
+        .collect()
 }
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Deliver everything both nodes want to send; returns the events seen per node.
-fn shuttle<M: StateMachine + Clone>(
-    nodes: &mut [AccountableState<M>; 2],
-    events: &mut [Vec<Event>; 2],
-) {
+/// Deliver everything the nodes want to send; collects the events each one saw.
+fn shuttle<M: StateMachine + Clone>(nodes: &mut [AccountableState<M>], events: &mut [Vec<Event>]) {
+    let ids: Vec<_> = keys().iter().map(SigningKey::id).collect();
     loop {
         let mut moved = false;
-        for i in 0..2 {
+        for i in 0..nodes.len() {
             while let Some(out) = nodes[i].poll(Instant::now()) {
                 moved = true;
                 match out {
-                    Output::Send(Outgoing::Opponent(bytes)) => {
-                        nodes[1 - i].receive(Peer::Opponent, &bytes).unwrap();
+                    Output::Send(Outgoing::Member { to, bytes }) => {
+                        for j in (0..nodes.len()).filter(|&j| j != i) {
+                            if matches!(to, Dest::All) || to == Dest::Peer(ids[j]) {
+                                nodes[j].receive(Peer::Member(ids[i]), &bytes).unwrap();
+                            }
+                        }
                     }
                     Output::Send(Outgoing::Witness(_)) => {}
                     Output::Event(e) => events[i].push(e),
@@ -78,18 +85,18 @@ fn shuttle<M: StateMachine + Clone>(
     }
 }
 fn play<M: StateMachine + Clone>(
-    nodes: &mut [AccountableState<M>; 2],
+    nodes: &mut [AccountableState<M>],
     ticks: u64,
     fault_at: Option<u64>,
-) -> [Vec<Event>; 2] {
-    let mut events = [Vec::new(), Vec::new()];
+) -> Vec<Vec<Event>> {
+    let mut events = vec![Vec::new(); nodes.len()];
     for t in 0..ticks {
         let control = [LEFT, RIGHT, ACT, 0][(t % 4) as usize];
         for (i, node) in nodes.iter_mut().enumerate() {
             if i == 0 && fault_at == Some(t) {
                 inject(node);
             }
-            node.submit(control).unwrap();
+            node.submit(&controls(control)).unwrap();
         }
         shuttle(nodes, &mut events);
     }
@@ -107,16 +114,15 @@ fn inject<M: StateMachine + Clone>(_: &mut AccountableState<M>) {
 fn verifier() -> Verifier {
     Verifier::new(TrustAnchor {
         match_id: MATCH,
-        ruleset: GridRules::new(roster()).ruleset_hash(),
-        roster: roster(),
+        ruleset: GridRules.ruleset_hash(),
+        session: session().digest(),
     })
 }
 
 #[test]
-fn an_honest_pair_certifies_and_exports_a_verifiable_archive() {
+fn an_honest_group_certifies_and_exports_a_verifiable_archive() {
     let dir = scratch("honest");
-    let rules = GridRules::new(roster());
-    let mut nodes = open_pair(&rules, &dir);
+    let mut nodes = open_all(&GridRules, &dir);
     let events = play(&mut nodes, 200, None);
     for (node, seen) in nodes.iter().zip(&events) {
         let view = node.state();
@@ -125,13 +131,15 @@ fn an_honest_pair_certifies_and_exports_a_verifiable_archive() {
         assert!(view.checkpoint.is_some());
         assert!(!seen.iter().any(|e| matches!(e, Event::Violation(_))));
     }
-    assert_eq!(nodes[0].state().state, nodes[1].state().state);
+    assert!(nodes
+        .windows(2)
+        .all(|w| w[0].state().state == w[1].state().state));
     for n in &mut nodes {
         n.flush();
     }
     let pkg = nodes[0].export(ExportQuery::MatchArchive).unwrap();
     assert!(matches!(
-        verifier().verify_package(pkg.bytes(), &rules),
+        verifier().verify_package(pkg.bytes(), &GridRules),
         VerificationResult::Valid(_)
     ));
     let feed = nodes[0].subscribe(0, 100);
@@ -145,18 +153,19 @@ fn an_honest_pair_certifies_and_exports_a_verifiable_archive() {
 #[test]
 fn a_false_checkpoint_becomes_an_exportable_proven_violation() {
     let dir = scratch("fraud");
-    let rules = GridRules::new(roster());
-    let mut nodes = open_pair(&rules, &dir);
+    let mut nodes = open_all(&GridRules, &dir);
     let cheater = keys()[0].id();
     let events = play(&mut nodes, 120, Some(30));
-    assert!(events[1]
-        .iter()
-        .any(|e| matches!(e, Event::Violation(v) if v.accused == cheater)));
+    for seen in &events[1..] {
+        assert!(seen
+            .iter()
+            .any(|e| matches!(e, Event::Violation(v) if v.accused == cheater)));
+    }
     let commitment = nodes[1]
         .subscribe(0, 1000)
         .into_iter()
         .find_map(|e| match e.event {
-            ExportEvent::Evidence {
+            accountable_state::ExportEvent::Evidence {
                 accused,
                 commitment,
             } if accused == cheater => Some(commitment),
@@ -164,7 +173,7 @@ fn a_false_checkpoint_becomes_an_exportable_proven_violation() {
         })
         .expect("evidence published on the feed");
     let pkg = nodes[1].export(ExportQuery::Fraud(commitment.id)).unwrap();
-    match verifier().verify_package(pkg.bytes(), &rules) {
+    match verifier().verify_package(pkg.bytes(), &GridRules) {
         VerificationResult::ProvenViolation(p) => assert_eq!(p.accused, vec![cheater]),
         other => panic!("{other:?}"),
     }
@@ -174,7 +183,7 @@ fn a_false_checkpoint_becomes_an_exportable_proven_violation() {
 fn open_fails_closed_when_storage_is_unavailable() {
     let missing = scratch("nostore").join("absent").join("node");
     let err = AccountableState::open(
-        GridRules::new(roster()),
+        GridRules,
         config(keys()[0].clone(), DurableStorage::at(missing)),
     )
     .err()
@@ -185,9 +194,9 @@ fn open_fails_closed_when_storage_is_unavailable() {
 #[test]
 fn a_key_outside_the_roster_is_refused() {
     let dir = scratch("roster");
-    let stranger = SigningKey::from_seed([3; 32]);
+    let stranger = SigningKey::from_seed([77; 32]);
     let err = AccountableState::open(
-        GridRules::new(roster()),
+        GridRules,
         config(stranger, DurableStorage::at(dir.join("x"))),
     )
     .err()
@@ -198,32 +207,34 @@ fn a_key_outside_the_roster_is_refused() {
 #[test]
 fn a_witness_may_only_deliver_challenges_and_retained_heads() {
     let dir = scratch("witness");
-    let mut nodes = open_pair(&GridRules::new(roster()), &dir);
+    let mut nodes = open_all(&GridRules, &dir);
+    let witness = SigningKey::from_seed([88; 32]).id();
     let req = PipeMsg::AnchorReq.encode().unwrap();
     assert_eq!(
-        nodes[0].receive(Peer::Witness, &req),
+        nodes[0].receive(Peer::Witness(witness), &req),
         Err(ReceiveError::NotAllowedFromWitness)
     );
     assert_eq!(
-        nodes[0].receive(Peer::Opponent, &[0xff, 1, 2]),
+        nodes[0].receive(Peer::Member(keys()[1].id()), &[0xff, 1, 2]),
         Err(ReceiveError::Malformed)
     );
 }
 
 /// A ledger where `ACT` is a transfer whose outcome depends on a global order.
 #[derive(Clone)]
-struct Ledger(GridRules);
+struct Ledger;
 impl StateMachine for Ledger {
     fn ruleset_hash(&self) -> accountable_state::Digest {
-        self.0.ruleset_hash()
+        GridRules.ruleset_hash()
     }
-    fn genesis(&self, roster: &[PlayerId; 2]) -> Vec<u8> {
-        self.0.genesis(roster)
+    fn genesis(&self, session: &Session) -> Vec<u8> {
+        GridRules.genesis(session)
     }
     fn apply(&self, state: &[u8], input: &[u8]) -> Result<Vec<u8>, RuleError> {
-        self.0.apply(state, input)
+        GridRules.apply(state, input)
     }
-    fn ordering(&self, control: u16) -> ActionOrdering {
+    fn ordering(&self, payload: &[u8]) -> ActionOrdering {
+        let control = u16::from_le_bytes([payload[0], payload[1]]);
         if control & ACT != 0 {
             ActionOrdering::RequiresExternalOrdering
         } else {
@@ -235,11 +246,21 @@ impl StateMachine for Ledger {
 #[test]
 fn externally_ordered_actions_are_never_accepted_locally() {
     let dir = scratch("ordering");
-    let mut nodes = open_pair(&Ledger(GridRules::new(roster())), &dir);
+    let mut nodes = open_all(&Ledger, &dir);
     assert_eq!(
-        nodes[0].submit(ACT),
+        nodes[0].submit(&controls(ACT)),
         Err(SubmitError::RequiresExternalOrdering)
     );
-    assert_eq!(nodes[0].submit(LEFT), Ok(0));
+    assert_eq!(nodes[0].submit(&controls(LEFT)), Ok(0));
     assert_eq!(nodes[0].state().next_submit, 1);
+}
+
+#[test]
+fn an_action_of_the_wrong_width_is_refused() {
+    let dir = scratch("width");
+    let mut nodes = open_all(&GridRules, &dir);
+    assert_eq!(
+        nodes[0].submit(&[1]),
+        Err(SubmitError::WrongWidth { expected: 2 })
+    );
 }

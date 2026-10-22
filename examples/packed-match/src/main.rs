@@ -1,42 +1,34 @@
 //! Offline illustration of input packing and chunking, NOT a complete game verifier.
 use gv_codec::chunks::{plan, ChunkPlan, Limits};
-use gv_codec::{Aggregate, ControlChange, PackedControls, SignedPackedControls};
+use gv_codec::{Aggregate, EventBatch, EventBody, HeldChange, SignedEventBatch};
 use gv_sig::SigningKey;
 fn main() {
     let mut records = Vec::new();
     for (i, seed) in [7u8, 8u8].into_iter().enumerate() {
         let key = SigningKey::from_seed([seed; 32]);
-        let controls = PackedControls {
+        let held = |offset, state| HeldChange {
+            offset,
+            payload: vec![state],
+        };
+        let batch = EventBatch {
             match_id: [1; 32],
-            player: key.id(),
+            participant: key.id(),
             previous_batch_hash: [0; 32], // demo only: production pins match genesis here
             start_tick: 0,
             tick_count: 216_000,
-            control_bytes: 1,
-            initial_state: 1,
-            changes: vec![
-                ControlChange {
-                    offset: 18_000,
-                    state: 0,
-                },
-                ControlChange {
-                    offset: 36_000,
-                    state: 1,
-                },
-                ControlChange {
-                    offset: 215_999,
-                    state: 0,
-                },
-            ],
+            body: EventBody::Held {
+                initial: vec![1],
+                changes: vec![held(18_000, 0), held(36_000, 1), held(215_999, 0)],
+            },
         };
-        let signed = SignedPackedControls::sign(controls, &key).expect("sign");
+        let signed = SignedEventBatch::sign(batch, &key).expect("sign");
         println!(
             "player {i}: {} signed bytes",
             signed.encode().expect("encode").len()
         );
         records.push(signed);
     }
-    records.sort_by_key(|r| r.record.player);
+    records.sort_by_key(|r| r.record.participant);
     let aggregate = Aggregate { records };
     println!(
         "total authenticated aggregate: {} bytes",

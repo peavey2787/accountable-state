@@ -13,7 +13,7 @@ use crate::audit::{
 };
 use crate::export::{verify_package, Package, TrustAnchor, Verified};
 use crate::StateMachine;
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, MatchId, ParticipantId, Session};
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -45,20 +45,20 @@ const CHUNKS_PER_TICK: usize = 4;
 #[derive(Clone, Debug)]
 pub enum Msg {
     Hello {
-        witness: PlayerId,
+        witness: ParticipantId,
         nonce: u64,
         sig: Signature,
     },
     Admit {
-        player: PlayerId,
-        witness: PlayerId,
+        player: ParticipantId,
+        witness: ParticipantId,
         nonce: u64,
         sig: Signature,
     },
     Auth(Authenticator),
     Inventory {
         items: Vec<Digest>,
-        heads: Vec<(PlayerId, u64)>,
+        heads: Vec<(ParticipantId, u64)>,
     },
     Want(Vec<Digest>),
     Evidence(Box<Evidence>),
@@ -104,14 +104,14 @@ impl<'a> Rd<'a> {
     }
 }
 
-fn hello_body(m: &MatchId, w: &PlayerId, to: &PlayerId, nonce: u64) -> Vec<u8> {
+fn hello_body(m: &MatchId, w: &ParticipantId, to: &ParticipantId, nonce: u64) -> Vec<u8> {
     let mut b = m.to_vec();
     b.extend_from_slice(w);
     b.extend_from_slice(to);
     b.extend_from_slice(&nonce.to_le_bytes());
     b
 }
-fn admit_body(m: &MatchId, p: &PlayerId, w: &PlayerId, nonce: u64) -> Vec<u8> {
+fn admit_body(m: &MatchId, p: &ParticipantId, w: &ParticipantId, nonce: u64) -> Vec<u8> {
     hello_body(m, p, w, nonce)
 }
 
@@ -262,7 +262,7 @@ pub type LinkId = u32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Remote {
     /// The remote is this pinned player (I am a witness, or a peer witness).
-    Player(PlayerId),
+    Player(ParticipantId),
     /// The remote is some witness from the pinned witness set (I am a player).
     AnyWitness,
 }
@@ -271,7 +271,7 @@ pub enum Remote {
 struct Link {
     remote: Remote,
     /// Authenticated identity of the remote once admitted.
-    peer: Option<PlayerId>,
+    peer: Option<ParticipantId>,
     my_nonce: u64,
     last_hello: u64,
     last_inventory: u64,
@@ -298,12 +298,12 @@ struct Assembly {
 pub enum Event {
     Admitted {
         link: LinkId,
-        peer: PlayerId,
+        peer: ParticipantId,
     },
     /// New evidence verified independently; `accused` provably misbehaved.
     Verified {
         id: Digest,
-        accused: PlayerId,
+        accused: ParticipantId,
         kind: &'static str,
     },
     /// Evidence/package that did not verify: proves nothing about anyone.
@@ -344,16 +344,18 @@ pub struct Stats {
 
 pub struct WitnessNode<R: StateMachine + Clone> {
     key: SigningKey,
-    me: PlayerId,
+    me: ParticipantId,
     match_id: MatchId,
     ruleset: Digest,
-    roster: [PlayerId; 2],
-    witnesses: BTreeSet<PlayerId>,
+    session: Session,
+    /// Every roster member: heads are collected and served for all of them.
+    roster: Vec<ParticipantId>,
+    witnesses: BTreeSet<ParticipantId>,
     rules: R,
     ledger: Ledger,
     /// Encoded evidence/package by id for serving `Want`.
     items: BTreeMap<Digest, Vec<u8>>,
-    auths: BTreeMap<PlayerId, BTreeMap<u64, Authenticator>>,
+    auths: BTreeMap<ParticipantId, BTreeMap<u64, Authenticator>>,
     links: BTreeMap<LinkId, Link>,
     book: ChallengeBook,
     kinds: BTreeMap<Digest, (LinkId, ChallengeKind, Authenticator)>,
@@ -364,16 +366,10 @@ pub struct WitnessNode<R: StateMachine + Clone> {
 }
 
 impl<R: StateMachine + Clone> WitnessNode<R> {
-    pub fn new(
-        key: SigningKey,
-        match_id: MatchId,
-        roster: [PlayerId; 2],
-        witnesses: &[PlayerId],
-        rules: R,
-    ) -> Self {
+    pub fn new(key: SigningKey, session: Session, witnesses: &[ParticipantId], rules: R) -> Self {
         let ruleset = rules.ruleset_hash();
-        let mut r = roster;
-        r.sort();
+        let match_id = session.match_id;
+        let roster = session.roster.participants().iter().map(|p| p.id).collect();
         Self {
             me: key.id(),
             book: ChallengeBook::new(
@@ -387,7 +383,8 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
             key,
             match_id,
             ruleset,
-            roster: r,
+            roster,
+            session,
             witnesses: witnesses.iter().copied().collect(),
             rules,
             ledger: Ledger::new(),
@@ -428,7 +425,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
     pub fn inject_raw(&mut self, link: LinkId, bytes: &[u8]) {
         self.out.push_back((link, bytes.to_vec()));
     }
-    pub fn latest_auth(&self, owner: &PlayerId) -> Option<&Authenticator> {
+    pub fn latest_auth(&self, owner: &ParticipantId) -> Option<&Authenticator> {
         self.auths.get(owner).and_then(|m| m.values().next_back())
     }
     pub fn is_admitted(&self, link: LinkId) -> bool {
@@ -609,7 +606,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
         let anchor = TrustAnchor {
             match_id: self.match_id,
             ruleset: self.ruleset,
-            roster: self.roster,
+            session: self.session.digest(),
         };
         let Ok(pkg) = Package::decode(bytes) else {
             return self.reject(from);
@@ -711,7 +708,12 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
 
     /// Ask a player for the log segment between two authenticators I hold; the answer is checked
     /// against the signed heads. A silent target only ever becomes SUSPECTED/UNAVAILABLE.
-    pub fn audit_player(&mut self, link: LinkId, player: PlayerId, now: u64) -> Option<Digest> {
+    pub fn audit_player(
+        &mut self,
+        link: LinkId,
+        player: ParticipantId,
+        now: u64,
+    ) -> Option<Digest> {
         let a = self.latest_auth(&player)?.clone();
         let base = self
             .auths
@@ -748,7 +750,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
         }
         self.book.gc();
         // Admission is retried until answered: Hello or Admit may be lost.
-        let hellos: Vec<(LinkId, PlayerId, u64)> = self
+        let hellos: Vec<(LinkId, ParticipantId, u64)> = self
             .links
             .iter()
             .filter_map(|(k, l)| match l.remote {
@@ -799,7 +801,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
             .collect();
         for k in due {
             let items: Vec<Digest> = self.items.keys().copied().take(MAX_INVENTORY).collect();
-            let heads: Vec<(PlayerId, u64)> = self
+            let heads: Vec<(ParticipantId, u64)> = self
                 .roster
                 .iter()
                 .filter_map(|p| self.latest_auth(p).map(|a| (*p, a.seq)))
@@ -872,7 +874,14 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
         }
     }
 
-    fn on_hello(&mut self, link: LinkId, witness: PlayerId, nonce: u64, sig: &Signature, now: u64) {
+    fn on_hello(
+        &mut self,
+        link: LinkId,
+        witness: ParticipantId,
+        nonce: u64,
+        sig: &Signature,
+        now: u64,
+    ) {
         let Some(remote) = self.links.get(&link).map(|l| l.remote) else {
             return;
         };
@@ -906,8 +915,8 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
     fn on_admit(
         &mut self,
         link: LinkId,
-        player: PlayerId,
-        witness: PlayerId,
+        player: ParticipantId,
+        witness: ParticipantId,
         nonce: u64,
         sig: &Signature,
         now: u64,
@@ -941,7 +950,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
         self.events.push_back(Event::Rejected { link });
         self.strike(link);
     }
-    fn admit(&mut self, link: LinkId, peer: PlayerId, now: u64) {
+    fn admit(&mut self, link: LinkId, peer: ParticipantId, now: u64) {
         if let Some(l) = self.links.get_mut(&link) {
             l.peer = Some(peer);
             l.last_inventory = now.saturating_sub(INVENTORY_EVERY); // inventory goes out next tick
@@ -957,7 +966,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
             self.send(link, &Msg::Auth(a));
         }
     }
-    fn on_inventory(&mut self, link: LinkId, items: &[Digest], heads: &[(PlayerId, u64)]) {
+    fn on_inventory(&mut self, link: LinkId, items: &[Digest], heads: &[(ParticipantId, u64)]) {
         let want: Vec<Digest> = items
             .iter()
             .filter(|i| !self.items.contains_key(*i))
@@ -969,7 +978,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
         }
         // If the peer has newer heads than mine, its own announcements will carry them; if I have
         // newer ones, push the latest so a lagging peer converges without a full sync.
-        for p in self.roster {
+        for p in self.roster.clone() {
             let theirs = heads.iter().find(|(o, _)| *o == p).map_or(0, |(_, s)| *s);
             if let Some(a) = self.latest_auth(&p).filter(|a| a.seq > theirs).cloned() {
                 self.send(link, &Msg::Auth(a));

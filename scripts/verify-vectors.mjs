@@ -40,7 +40,7 @@ if (!opensslHasMlDsa()) {
 const signed = JSON.parse(readFileSync(resolve(selfDir, '../tests/interoperability/signed_mldsa65_v1.json'),'utf8'));
 const vk = Buffer.from(signed.verifying_key_hex,'hex');
 if (vk.length !== 1952) throw Error('bad ML-DSA-65 verifying key length');
-// PlayerId = SHA-256("gv/player-id/v1\0" || alg(1) || vk)
+// ParticipantId = SHA-256("gv/player-id/v1\0" || alg(1) || vk)
 assertHex(digest(Buffer.from('gv/player-id/v1\0'), Buffer.from([1]), vk), signed.player_id_hex, 'player id');
 // Envelope = SHA-512("gv/sig-envelope\0" || [version, alg] || u16 label_len || label || signer || u64 body_len || body)
 const body = Buffer.from(signed.body_hex,'hex');

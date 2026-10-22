@@ -1,7 +1,7 @@
 //! Authenticated, bounded input transcript. Signatures do not by themselves establish
 //! ordering or finality; a quorum-certified checkpoint must also be verified.
 #![forbid(unsafe_code)]
-use gv_core::{MatchId, PlayerId};
+use gv_core::{MatchId, ParticipantId};
 use gv_sig::{Signature, SigningKey};
 
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -9,7 +9,7 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedInput {
     pub match_id: MatchId,
-    pub player: PlayerId,
+    pub player: ParticipantId,
     pub tick: u64,
     pub sequence: u64,
     pub payload: Vec<u8>,
@@ -87,7 +87,7 @@ impl SignedInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedStateClaim {
     pub match_id: MatchId,
-    pub player: PlayerId,
+    pub player: ParticipantId,
     pub tick: u64,
     pub previous_state: [u8; 32],
     pub proposed_next_state: [u8; 32],
@@ -147,12 +147,12 @@ impl SignedStateClaim {
 #[derive(Clone, Debug)]
 pub struct PlayerTranscript {
     match_id: Option<MatchId>,
-    player: Option<PlayerId>,
+    player: Option<ParticipantId>,
     records: Vec<SignedInput>,
 }
 
 impl PlayerTranscript {
-    pub fn new(match_id: MatchId, player: PlayerId) -> Self {
+    pub fn new(match_id: MatchId, player: ParticipantId) -> Self {
         Self {
             match_id: Some(match_id),
             player: Some(player),

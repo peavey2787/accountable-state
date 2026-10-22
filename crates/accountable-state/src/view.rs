@@ -1,6 +1,6 @@
 //! Optional disclosure policy: how an application projects certified state for one observer.
 //! A view is a presentation decision of the application, not network access control.
-use gv_core::PlayerId;
+use gv_core::ParticipantId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
@@ -30,7 +30,7 @@ pub trait ViewPolicy {
     fn view_for(
         &self,
         state: &[u8],
-        observer: &PlayerId,
+        observer: &ParticipantId,
         role: ObserverRole,
     ) -> Result<AuthorizedView, String>;
 }

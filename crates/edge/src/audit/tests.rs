@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Checkpoint, SignedCheckpoint};
-use gv_codec::{ControlChange, PackedControls, SignedPackedControls};
+use gv_codec::{EventBatch, EventBody, HeldChange, SignedEventBatch};
 use gv_sig::SigningKey;
 
 const M: [u8; 32] = [7; 32];
@@ -21,18 +21,19 @@ fn batch(
     start: u64,
     count: u32,
     init: u16,
-    changes: Vec<ControlChange>,
-) -> SignedPackedControls {
-    SignedPackedControls::sign(
-        PackedControls {
+    changes: Vec<HeldChange>,
+) -> SignedEventBatch {
+    SignedEventBatch::sign(
+        EventBatch {
             match_id: M,
-            player: k.id(),
+            participant: k.id(),
             previous_batch_hash: [0; 32],
             start_tick: start,
             tick_count: count,
-            control_bytes: 1,
-            initial_state: init,
-            changes,
+            body: EventBody::Held {
+                initial: init.to_le_bytes().to_vec(),
+                changes,
+            },
         },
         k,
     )
@@ -42,6 +43,7 @@ fn cp(k: &SigningKey, next: u8) -> SignedCheckpoint {
     SignedCheckpoint::sign(
         Checkpoint {
             match_id: M,
+            session: [3; 32],
             ruleset: R,
             epoch_start: 0,
             epoch_length: 20,
@@ -165,13 +167,13 @@ fn conflicting_authenticators_and_forks_are_proven() {
 #[test]
 fn conflicting_batches_need_a_real_disagreement() {
     let a = key(1);
-    let up = ControlChange {
+    let up = HeldChange {
         offset: 1,
-        state: 4,
+        payload: 4u16.to_le_bytes().to_vec(),
     };
-    let full = batch(&a, 0, 20, 1, vec![up]);
+    let full = batch(&a, 0, 20, 1, vec![up.clone()]);
     // Shorter re-sign of the same prefix agrees: legitimate, not equivocation.
-    let prefix = batch(&a, 0, 10, 1, vec![up]);
+    let prefix = batch(&a, 0, 10, 1, vec![up.clone()]);
     assert_eq!(
         Evidence::ConflictingBatches(full.clone(), prefix).verify(),
         Err(EvidenceError::NotAViolation)
@@ -221,7 +223,7 @@ fn conflicting_checkpoints_and_framing_resistance() {
         .is_err());
     // Framing: splice b's signature onto a's claim: signature fails.
     let mut forged = cp(&b, 5);
-    forged.player = a.id();
+    forged.signer = a.id();
     assert_eq!(
         Evidence::ConflictingCheckpoints(cp(&a, 3), forged).verify(),
         Err(EvidenceError::BadSignature)

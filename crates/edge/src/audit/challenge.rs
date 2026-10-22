@@ -3,7 +3,7 @@
 //! UNAVAILABLE): it is never a cryptographic cheating verdict, and a late valid
 //! answer always clears it. All time is in caller-supplied logical ticks.
 use super::log::{LogError, Reader};
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, MatchId, ParticipantId};
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, VecDeque};
@@ -54,7 +54,7 @@ pub enum ChallengeKind {
     Ack { seq: u64 },
     LogSegment { from: u64, to: u64 },
     MerkleWitness { epoch_start: u64 },
-    HiddenReveal { start_tick: u64 },
+    SealedReveal { start_tick: u64 },
     Replay { epoch_start: u64 },
 }
 
@@ -65,7 +65,7 @@ impl ChallengeKind {
             Self::Ack { seq } => (2, seq, 0),
             Self::LogSegment { from, to } => (3, from, to),
             Self::MerkleWitness { epoch_start } => (4, epoch_start, 0),
-            Self::HiddenReveal { start_tick } => (5, start_tick, 0),
+            Self::SealedReveal { start_tick } => (5, start_tick, 0),
             Self::Replay { epoch_start } => (6, epoch_start, 0),
         };
         let mut o = [0u8; 17];
@@ -82,7 +82,7 @@ impl ChallengeKind {
             2 => Self::Ack { seq: a },
             3 => Self::LogSegment { from: a, to: c },
             4 => Self::MerkleWitness { epoch_start: a },
-            5 => Self::HiddenReveal { start_tick: a },
+            5 => Self::SealedReveal { start_tick: a },
             6 => Self::Replay { epoch_start: a },
             _ => return Err(LogError::Malformed),
         })
@@ -92,8 +92,8 @@ impl ChallengeKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
     pub match_id: MatchId,
-    pub challenger: PlayerId,
-    pub target: PlayerId,
+    pub challenger: ParticipantId,
+    pub target: ParticipantId,
     pub nonce: u64,
     pub kind: ChallengeKind,
     pub issued_tick: u64,
@@ -146,13 +146,13 @@ impl Challenge {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
     pub challenge_id: Digest,
-    pub responder: PlayerId,
+    pub responder: ParticipantId,
     pub payload: Vec<u8>,
     pub signature: Signature,
 }
 
 impl Response {
-    fn body(id: &Digest, responder: &PlayerId, payload: &[u8]) -> Vec<u8> {
+    fn body(id: &Digest, responder: &ParticipantId, payload: &[u8]) -> Vec<u8> {
         let mut o = Vec::with_capacity(64 + payload.len());
         o.extend_from_slice(id);
         o.extend_from_slice(responder);
@@ -322,7 +322,7 @@ impl ChallengeBook {
     /// Issue a challenge. Bounded per target and in total.
     pub fn issue(
         &mut self,
-        target: PlayerId,
+        target: ParticipantId,
         kind: ChallengeKind,
         now: u64,
     ) -> Result<Challenge, Reject> {
@@ -441,11 +441,11 @@ impl ChallengeBook {
 /// Responder-side admission control: authenticate, deduplicate, rate-limit.
 #[derive(Debug)]
 pub struct ChallengeGate {
-    me: PlayerId,
+    me: ParticipantId,
     match_id: MatchId,
     seen: VecDeque<Digest>,
     seen_set: BTreeMap<Digest, u8>,
-    per_challenger: BTreeMap<PlayerId, usize>,
+    per_challenger: BTreeMap<ParticipantId, usize>,
 }
 
 impl ChallengeGate {
@@ -453,7 +453,7 @@ impl ChallengeGate {
     /// A challenge is re-answered for its retransmissions, but only this many times.
     pub const MAX_ANSWERS_PER_CHALLENGE: u8 = 8;
     pub const MAX_WINDOW_TICKS: u64 = 3600;
-    pub fn new(me: PlayerId, match_id: MatchId) -> Self {
+    pub fn new(me: ParticipantId, match_id: MatchId) -> Self {
         Self {
             me,
             match_id,

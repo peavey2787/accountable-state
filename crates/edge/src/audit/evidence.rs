@@ -2,8 +2,8 @@
 //! third party: every one is checked from signatures and hashes alone.
 use super::log::{Authenticator, LogError, Reader, Segment};
 use crate::SignedCheckpoint;
-use gv_codec::SignedPackedControls;
-use gv_core::{Digest, PlayerId};
+use gv_codec::SignedEventBatch;
+use gv_core::{Digest, ParticipantId};
 use sha2::{Digest as _, Sha256};
 
 pub const MAX_EVIDENCE_BYTES: usize = 1 << 20;
@@ -22,7 +22,7 @@ pub enum EvidenceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Proof {
     /// Two conflicting signed statements for the same slot.
-    Equivocation(PlayerId),
+    Equivocation(ParticipantId),
 }
 
 #[derive(Clone, Debug)]
@@ -36,8 +36,8 @@ pub enum Evidence {
         later: Authenticator,
         segment: Segment,
     },
-    /// Two signed input batches from one player that disagree about a tick.
-    ConflictingBatches(SignedPackedControls, SignedPackedControls),
+    /// Two signed event batches from one participant that disagree about a tick.
+    ConflictingBatches(SignedEventBatch, SignedEventBatch),
     /// Two signed checkpoints for the same slot with different claims.
     ConflictingCheckpoints(SignedCheckpoint, SignedCheckpoint),
 }
@@ -92,7 +92,7 @@ impl Evidence {
                 a.verify().map_err(|_| EvidenceError::BadSignature)?;
                 b.verify().map_err(|_| EvidenceError::BadSignature)?;
                 let (x, y) = (&a.record, &b.record);
-                if x.player != y.player || x.match_id != y.match_id {
+                if x.participant != y.participant || x.match_id != y.match_id {
                     return Err(EvidenceError::NotAViolation);
                 }
                 let lo = x.start_tick.max(y.start_tick);
@@ -100,14 +100,14 @@ impl Evidence {
                     .min(y.start_tick + u64::from(y.tick_count));
                 let mut t = lo;
                 while t < hi {
-                    let cx = x
-                        .state_at((t - x.start_tick) as u32)
+                    let ex = x
+                        .events_at((t - x.start_tick) as u32)
                         .map_err(|_| EvidenceError::Malformed)?;
-                    let cy = y
-                        .state_at((t - y.start_tick) as u32)
+                    let ey = y
+                        .events_at((t - y.start_tick) as u32)
                         .map_err(|_| EvidenceError::Malformed)?;
-                    if cx != cy {
-                        return Ok(Proof::Equivocation(x.player));
+                    if ex != ey {
+                        return Ok(Proof::Equivocation(x.participant));
                     }
                     t += 1;
                 }
@@ -118,8 +118,9 @@ impl Evidence {
                 a.verify().map_err(|_| EvidenceError::BadSignature)?;
                 b.verify().map_err(|_| EvidenceError::BadSignature)?;
                 let (x, y) = (&a.claim, &b.claim);
-                if a.player != b.player
+                if a.signer != b.signer
                     || x.match_id != y.match_id
+                    || x.session != y.session
                     || x.ruleset != y.ruleset
                     || x.epoch_start != y.epoch_start
                     || x.epoch_length != y.epoch_length
@@ -128,17 +129,17 @@ impl Evidence {
                 {
                     return Err(EvidenceError::NotAViolation);
                 }
-                Ok(Proof::Equivocation(a.player))
+                Ok(Proof::Equivocation(a.signer))
             }
         }
     }
 
-    pub fn accused(&self) -> PlayerId {
+    pub fn accused(&self) -> ParticipantId {
         match self {
             Self::ConflictingAuthenticators(a, _) => a.owner,
             Self::Fork { later, .. } => later.owner,
-            Self::ConflictingBatches(a, _) => a.record.player,
-            Self::ConflictingCheckpoints(a, _) => a.player,
+            Self::ConflictingBatches(a, _) => a.record.participant,
+            Self::ConflictingCheckpoints(a, _) => a.signer,
         }
     }
 
@@ -161,7 +162,7 @@ impl Evidence {
     }
 
     fn parts(&self) -> Result<Vec<Vec<u8>>, EvidenceError> {
-        let batch = |b: &SignedPackedControls| b.encode().map_err(|_| EvidenceError::Malformed);
+        let batch = |b: &SignedEventBatch| b.encode().map_err(|_| EvidenceError::Malformed);
         Ok(match self {
             Self::ConflictingAuthenticators(a, b) => vec![a.encode(), b.encode()],
             Self::Fork {
@@ -222,8 +223,7 @@ impl Evidence {
             return Err(EvidenceError::Malformed);
         }
         let auth = |x: &[u8]| Authenticator::decode(x).map_err(m);
-        let batch =
-            |x: &[u8]| SignedPackedControls::decode(x).map_err(|_| EvidenceError::Malformed);
+        let batch = |x: &[u8]| SignedEventBatch::decode(x).map_err(|_| EvidenceError::Malformed);
         let cp = |x: &[u8]| SignedCheckpoint::decode(x).map_err(|_| EvidenceError::Malformed);
         Ok(match tag {
             1 => Self::ConflictingAuthenticators(auth(parts[0])?, auth(parts[1])?),

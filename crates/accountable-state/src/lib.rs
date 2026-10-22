@@ -42,13 +42,20 @@ pub use io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, Witne
 pub use node::{AccountableState, StateView};
 pub use verifier::{Reason, VerificationResult, VerifiedProof, VerifiedRecord, Verifier};
 
-pub use gv_core::{Digest, MatchId, PlayerId};
+pub use gv_core::{Digest, MatchId, ParticipantId};
+
+/// Who takes part and how their work is certified and ordered.
+pub mod session {
+    pub use gv_core::{Certification, Ordering, Participant, Role, Roster, Session};
+}
 pub use gv_edge::export::{
     Commitment, DisclosurePolicy, ExportError, ExportEvent, FraudKind, PackageKind, TrustAnchor,
 };
 pub use gv_edge::feed::{read_since, SignedEvent};
+pub use gv_edge::live::PipelineConfig;
 pub use gv_edge::live::{
-    AuditEvent, AuditStats, HideError, PipeEvent as Event, Violation, ViolationKind,
+    AuditEvent, AuditStats, Dest, PipeEvent as Event, SealError, SealPolicy, Suspicion,
+    SuspicionKind, Violation, ViolationKind,
 };
 pub use gv_edge::CertifiedMatch;
 pub use gv_replay::{ActionOrdering, RuleError, StateMachine, ViolationCode};
@@ -67,7 +74,7 @@ pub mod audit {
 /// loop never waits for signatures or replay; [`AccountableState`] certifies it behind.
 pub mod realtime {
     pub use gv_edge::live::{
-        AdvanceError, StreamError, StreamFrame, StreamSender, Timeline, TimelineStats, TICK_HZ,
+        AdvanceError, Prediction, StreamError, StreamFrame, StreamSender, Timeline, TimelineStats,
     };
 }
 

@@ -274,6 +274,9 @@ dependencies = [
 [[package]]
 name = "gv-core"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "gv-edge"
@@ -300,6 +303,7 @@ dependencies = [
 name = "gv-replay"
 version = "0.1.0"
 dependencies = [
+ "gv-codec",
  "gv-commitments",
  "gv-core",
 ]

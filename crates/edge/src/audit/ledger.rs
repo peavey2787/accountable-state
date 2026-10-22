@@ -4,7 +4,7 @@
 use super::challenge::Status;
 use super::evidence::{Evidence, EvidenceError, Proof};
 use crate::{verify_checkpoint_evidence_with, CertifiedEpoch, CheckpointEvidence, EvidenceVerdict};
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, MatchId, ParticipantId};
 use gv_replay::StateMachine;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,19 +29,19 @@ pub enum Outcome {
 
 #[derive(Debug, Default)]
 pub struct Ledger {
-    entries: BTreeMap<Digest, (PlayerId, Status)>,
-    per_accused: BTreeMap<PlayerId, usize>,
+    entries: BTreeMap<Digest, (ParticipantId, Status)>,
+    per_accused: BTreeMap<ParticipantId, usize>,
     /// Accusations (by id) proven false; ignored forever, never re-litigated.
     exonerated: BTreeSet<Digest>,
     /// Non-proof statuses (suspicion/cleared), by accused.
-    soft: BTreeMap<PlayerId, Status>,
+    soft: BTreeMap<ParticipantId, Status>,
 }
 
 fn replay_id(e: &CheckpointEvidence) -> Digest {
     let mut s = Sha256::new();
     s.update(b"gv/audit/replay-accusation-id/v1\0");
     s.update(e.accused.claim.digest());
-    s.update(e.accused.player);
+    s.update(e.accused.signer);
     s.update(e.trusted_previous_checkpoint);
     s.update(e.trusted_previous_state);
     s.finalize().into()
@@ -63,7 +63,7 @@ impl Ledger {
     pub fn ids(&self) -> Vec<Digest> {
         self.entries.keys().copied().collect()
     }
-    fn admit(&mut self, id: Digest, accused: PlayerId, s: Status) -> Outcome {
+    fn admit(&mut self, id: Digest, accused: ParticipantId, s: Status) -> Outcome {
         if self.exonerated.contains(&id) || self.entries.contains_key(&id) {
             return Outcome::Duplicate;
         }
@@ -76,7 +76,7 @@ impl Ledger {
         Outcome::Recorded(s)
     }
     /// Self-proving equivocation evidence.
-    pub fn submit(&mut self, e: &Evidence, roster: &[PlayerId]) -> Outcome {
+    pub fn submit(&mut self, e: &Evidence, roster: &[ParticipantId]) -> Outcome {
         let id = match e.id() {
             Ok(id) => id,
             Err(x) => return Outcome::Rejected(x),
@@ -103,13 +103,13 @@ impl Ledger {
         let id = replay_id(e);
         match verify_checkpoint_evidence_with(rules, e, sanitize) {
             EvidenceVerdict::ProvenInvalidState => {
-                self.admit(id, e.accused.player, Status::ProvenFraud)
+                self.admit(id, e.accused.signer, Status::ProvenFraud)
             }
             EvidenceVerdict::ProvenInvalidAction(p) => self.admit(id, p, Status::ProvenFraud),
             EvidenceVerdict::ValidClaim | EvidenceVerdict::Inconclusive(_) => Outcome::Inconclusive,
         }
     }
-    /// Counterproof: a dual-signed certified epoch that verifies under the same
+    /// Counterproof: a certified epoch that verifies under the same
     /// trusted predecessor and matches the accused claim shows the allegation is
     /// false. Exonerates the accusation id; counterproofs are final (no further
     /// accusation about the same premise, so no ping-pong).
@@ -138,16 +138,16 @@ impl Ledger {
             }
         }
         self.exonerated.insert(id);
-        self.soft.insert(accusation.accused.player, Status::Cleared);
+        self.soft.insert(accusation.accused.signer, Status::Cleared);
         Outcome::Exonerated
     }
-    pub fn mark_soft(&mut self, who: PlayerId, s: Status) {
+    pub fn mark_soft(&mut self, who: ParticipantId, s: Status) {
         if !s.is_proof() {
             self.soft.insert(who, s);
         }
     }
     /// Strongest verdict about `who`; proof outranks suspicion outranks cleared.
-    pub fn status_of(&self, who: &PlayerId) -> Option<Status> {
+    pub fn status_of(&self, who: &ParticipantId) -> Option<Status> {
         let proven = self
             .entries
             .values()
@@ -175,11 +175,11 @@ impl Ledger {
 /// trusted nor required; they only add redundancy for evidence and logs.
 pub fn assign_witnesses(
     match_id: &MatchId,
-    roster: &[PlayerId],
-    exclude: &[PlayerId],
+    roster: &[ParticipantId],
+    exclude: &[ParticipantId],
     k: usize,
-) -> Vec<PlayerId> {
-    let mut ranked: Vec<(Digest, PlayerId)> = roster
+) -> Vec<ParticipantId> {
+    let mut ranked: Vec<(Digest, ParticipantId)> = roster
         .iter()
         .filter(|p| !exclude.contains(p))
         .map(|p| {

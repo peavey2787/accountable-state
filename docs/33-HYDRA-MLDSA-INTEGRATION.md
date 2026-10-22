@@ -11,8 +11,8 @@ version (V1). Nothing older is read, written or migrated.
 | Key | `MlDsaKeyPair::from_seed(seed32)`; verifying key 1952 B |
 | Signature | 3309 B; signing is hedged (randomised), so two signatures over one message differ |
 | Signed bytes | exactly 64: the SHA-512 *envelope digest* (below) |
-| `PlayerId` | `SHA-256("gv/player-id/v1\0" ‖ alg(1) ‖ verifying key)` (32 B) |
-| Key registry | verifying keys are interned by `PlayerId` (max 4096); `verify` of an unknown id fails |
+| `ParticipantId` | `SHA-256("gv/player-id/v1\0" ‖ alg(1) ‖ verifying key)` (32 B) |
+| Key registry | verifying keys are interned by `ParticipantId` (max 4096); `verify` of an unknown id fails |
 | Key files | `GV-PUBKEY/V1` (`encode_public_key_file` / `decode_public_key_file`) |
 
 ```

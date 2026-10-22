@@ -2,29 +2,24 @@
 use crate::audit::{compare_authenticators, AuditLog, Evidence};
 use crate::export::*;
 use crate::testkit::GridRules;
+use gv_core::Session;
 use gv_replay::StateMachine as _;
 use gv_sig::SigningKey;
 
 const M: [u8; 32] = [7; 32];
 
-fn setup() -> (
-    SigningKey,
-    SigningKey,
-    [gv_core::PlayerId; 2],
-    GridRules,
-    TrustAnchor,
-) {
+fn setup() -> (SigningKey, SigningKey, Session, GridRules, TrustAnchor) {
     let a = SigningKey::from_seed([1; 32]);
     let b = SigningKey::from_seed([2; 32]);
-    let mut roster = [a.id(), b.id()];
-    roster.sort();
-    let rules = GridRules::new(roster);
+    let c = SigningKey::from_seed([3; 32]);
+    let session = Session::unanimous(M, &[a.id(), b.id(), c.id()]).unwrap();
+    let rules = GridRules;
     let anchor = TrustAnchor {
         match_id: M,
         ruleset: rules.ruleset_hash(),
-        roster,
+        session: session.digest(),
     };
-    (a, b, roster, rules, anchor)
+    (a, b, session, rules, anchor)
 }
 
 /// Two heads signed for the same sequence number: the owner equivocated.
@@ -48,12 +43,11 @@ fn forked(owner: &SigningKey, rules: &GridRules) -> Evidence {
 
 #[test]
 fn equivocation_package_round_trips_and_resists_tampering() {
-    let (a, _b, roster, rules, anchor) = setup();
+    let (a, _b, session, rules, anchor) = setup();
     let ev = forked(&a, &rules);
     let pkg = export_fraud(
         &rules,
-        M,
-        roster,
+        &session,
         FraudWitness::Equivocation(&ev),
         DisclosurePolicy::PUBLIC,
     )
@@ -77,7 +71,7 @@ fn equivocation_package_round_trips_and_resists_tampering() {
             "flip at {i} accepted"
         );
     }
-    // Another match, another roster and a truncation never verify.
+    // Another match, another session and a truncation never verify.
     let mut other = anchor;
     other.match_id[0] ^= 1;
     assert_eq!(
@@ -89,7 +83,7 @@ fn equivocation_package_round_trips_and_resists_tampering() {
 
 #[test]
 fn a_non_violation_does_not_export_as_fraud() {
-    let (a, _b, roster, rules, anchor) = setup();
+    let (a, _b, session, rules, anchor) = setup();
     // Two authenticators of the same honest log, one an extension of the other: no conflict.
     let mut log = AuditLog::new(M, a.id());
     log.append(1, vec![1]).unwrap();
@@ -99,8 +93,7 @@ fn a_non_violation_does_not_export_as_fraud() {
     let ev = Evidence::ConflictingAuthenticators(first, second);
     let pkg = export_fraud(
         &rules,
-        M,
-        roster,
+        &session,
         FraudWitness::Equivocation(&ev),
         DisclosurePolicy::PUBLIC,
     )
@@ -113,7 +106,7 @@ fn a_non_violation_does_not_export_as_fraud() {
 
 #[test]
 fn audit_package_with_history_verifies_and_rejects_unlinked_records() {
-    let (a, b, roster, rules, anchor) = setup();
+    let (a, b, session, rules, anchor) = setup();
     let rs = rules.ruleset_hash();
     let mut log = AuditLog::new(M, a.id());
     for i in 0..6u64 {
@@ -128,7 +121,7 @@ fn audit_package_with_history_verifies_and_rejects_unlinked_records() {
         evidence: vec![ev],
         ..Default::default()
     };
-    let pkg = export_audit(&rules, M, roster, &audit, DisclosurePolicy::PUBLIC).unwrap();
+    let pkg = export_audit(&rules, &session, &audit, DisclosurePolicy::PUBLIC).unwrap();
     let bytes = pkg.encode().unwrap();
     let (_, v) = verify_package(&bytes, &anchor, &rules).unwrap();
     assert_eq!(
@@ -146,7 +139,7 @@ fn audit_package_with_history_verifies_and_rejects_unlinked_records() {
         segments: vec![seg],
         ..Default::default()
     };
-    let pkg = export_audit(&rules, M, roster, &orphan, DisclosurePolicy::PUBLIC).unwrap();
+    let pkg = export_audit(&rules, &session, &orphan, DisclosurePolicy::PUBLIC).unwrap();
     assert_eq!(
         verify_package(&pkg.encode().unwrap(), &anchor, &rules).unwrap_err(),
         ExportError::Invalid
@@ -157,7 +150,7 @@ fn audit_package_with_history_verifies_and_rejects_unlinked_records() {
         ..Default::default()
     };
     assert_eq!(
-        export_audit(&rules, M, roster, &many, DisclosurePolicy::PUBLIC)
+        export_audit(&rules, &session, &many, DisclosurePolicy::PUBLIC)
             .and_then(|p| p.encode())
             .unwrap_err(),
         ExportError::TooLarge
@@ -166,12 +159,11 @@ fn audit_package_with_history_verifies_and_rejects_unlinked_records() {
 
 #[test]
 fn commitments_never_claim_fraud_and_decode_strictly() {
-    let (a, _b, roster, rules, _anchor) = setup();
+    let (a, _b, session, rules, _anchor) = setup();
     let ev = forked(&a, &rules);
     let pkg = export_fraud(
         &rules,
-        M,
-        roster,
+        &session,
         FraudWitness::Equivocation(&ev),
         DisclosurePolicy::PUBLIC,
     )

@@ -1,6 +1,6 @@
 //! PeerReview-style tamper-evident log: an append-only hash chain whose heads are
 //! committed to by signed authenticators. Pure data; no clocks, no I/O.
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, MatchId, ParticipantId};
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 use sha2::{Digest as _, Sha256};
 
@@ -29,14 +29,14 @@ fn h(parts: &[&[u8]]) -> Digest {
 }
 
 /// Head of the empty log; binds match and owner so heads never transplant.
-pub fn genesis_head(match_id: &MatchId, owner: &PlayerId) -> Digest {
+pub fn genesis_head(match_id: &MatchId, owner: &ParticipantId) -> Digest {
     h(&[GENESIS_DOMAIN, match_id, owner])
 }
 
 /// head_n = H(domain || match || owner || seq || prev || kind || H(payload)).
 pub fn chain_head(
     match_id: &MatchId,
-    owner: &PlayerId,
+    owner: &ParticipantId,
     seq: u64,
     prev: &Digest,
     kind: u8,
@@ -64,7 +64,7 @@ pub struct LogEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Segment {
     pub match_id: MatchId,
-    pub owner: PlayerId,
+    pub owner: ParticipantId,
     pub start_seq: u64,
     pub prev_head: Digest,
     pub entries: Vec<LogEntry>,
@@ -163,7 +163,7 @@ impl<'a> Reader<'a> {
 #[derive(Clone, Debug)]
 pub struct AuditLog {
     match_id: MatchId,
-    owner: PlayerId,
+    owner: ParticipantId,
     base_seq: u64,
     base_head: Digest,
     entries: Vec<LogEntry>,
@@ -172,7 +172,7 @@ pub struct AuditLog {
 }
 
 impl AuditLog {
-    pub fn new(match_id: MatchId, owner: PlayerId) -> Self {
+    pub fn new(match_id: MatchId, owner: ParticipantId) -> Self {
         Self {
             base_seq: 0,
             base_head: genesis_head(&match_id, &owner),
@@ -187,7 +187,7 @@ impl AuditLog {
     /// (taken from an authenticator the owner signed). New entries extend that head, so
     /// everything signed up to `seq` stays consistent; earlier entries can no longer be served
     /// (a challenge for them ends UNAVAILABLE, never as a verdict).
-    pub fn rebased(match_id: MatchId, owner: PlayerId, seq: u64, head: Digest) -> Self {
+    pub fn rebased(match_id: MatchId, owner: ParticipantId, seq: u64, head: Digest) -> Self {
         Self {
             base_seq: seq,
             base_head: head,
@@ -201,7 +201,7 @@ impl AuditLog {
     pub fn match_id(&self) -> MatchId {
         self.match_id
     }
-    pub fn owner(&self) -> PlayerId {
+    pub fn owner(&self) -> ParticipantId {
         self.owner
     }
     pub fn len(&self) -> u64 {
@@ -330,7 +330,7 @@ impl AuditLog {
 pub struct Authenticator {
     pub match_id: MatchId,
     pub ruleset: Digest,
-    pub owner: PlayerId,
+    pub owner: ParticipantId,
     pub seq: u64,
     pub head: Digest,
     pub signature: Signature,
@@ -338,7 +338,7 @@ pub struct Authenticator {
 
 impl Authenticator {
     pub const WIRE_SIZE: usize = 32 * 4 + 8 + SIG_LEN;
-    fn body(m: &MatchId, r: &Digest, o: &PlayerId, seq: u64, head: &Digest) -> Vec<u8> {
+    fn body(m: &MatchId, r: &Digest, o: &ParticipantId, seq: u64, head: &Digest) -> Vec<u8> {
         let mut b = Vec::with_capacity(32 * 4 + 8);
         b.extend_from_slice(m);
         b.extend_from_slice(r);

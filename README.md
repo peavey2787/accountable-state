@@ -1,6 +1,6 @@
 # accountable-state
 
-**An SDK for accountable two-party state machines.** Two participants run the same
+**An SDK for accountable multi-party state machines.** A configured roster of participants (teams, roles) runs the same
 deterministic `StateMachine`; every action is signed (ML-DSA-65), replayed by both sides,
 committed to a Merkle log and co-certified. Misbehaviour leaves portable evidence
 (`GV-EVIDENCE-PACKAGE/V1`) that anyone can verify offline. No server, referee, blockchain or
@@ -11,7 +11,7 @@ majority vote is involved.
 > [docs/42](docs/42-REMAINING-GAPS.md).
 
 The first application is [anti-cheat](https://github.com/peavey2787/anti-cheat), a real-time
-1v1 arena built only on this SDK.
+real-time anti-cheat SDK and P2P arena built only on this SDK.
 
 ## The API
 
@@ -39,12 +39,12 @@ absence of a fraud proof never makes it final.
 
 * **Durable storage is mandatory.** Everything signed is journalled before it leaves the
   process ([docs/39](docs/39-ANCHORED-RECOVERY.md)); in-memory mode exists only for tests.
-* **Recovery is anchored.** After a restart nothing is signed until the opponent (and, if
+* **Recovery is anchored.** After a restart nothing is signed until the other members (and, if
   witnesses are pinned, a witness or a bounded wait) has answered with the newest head of ours
   it holds. The trust boundary and its residual risk are in
   [docs/39](docs/39-ANCHORED-RECOVERY.md#trust-boundary).
 * **Three separate streams:** the lossy 60 Hz input stream (`realtime`), the reliable signed
-  pipeline (`Peer::Opponent`) and the witness channel (`Peer::Witness`, `GV-WITNESS/V1`).
+  pipeline (`Peer::Member(id)`) and the witness channel (`Peer::Witness(id)`, `GV-WITNESS/V1`).
 * **ML-DSA-65 only, one evidence format, one event subscription.**
 
 ## Validation
@@ -69,7 +69,7 @@ To move the release lock forward, run `cargo update -p p2p-net`, review the diff
 | `crates/accountable-state` | the facade: the API above |
 | `crates/edge` | pipeline, replica, checkpoints, accountability (`audit`), export, feed, witness protocol |
 | `crates/replay` | `StateMachine`, `RuleError`, pure transition verification |
-| `crates/codec`, `crates/commitments`, `crates/transcript`, `crates/sig` | packed controls, SHA-256 Merkle logs, signed transcripts, ML-DSA-65 |
+| `crates/codec`, `crates/commitments`, `crates/transcript`, `crates/sig` | event batches, SHA-256 Merkle logs, signed transcripts, ML-DSA-65 |
 | `adapters/p2p` (feature `p2p`) | encrypted native transport over `p2p-net` and `hydra-msg` |
 | `spec/` | TLA+ model of the accountability protocol ([docs/41](docs/41-FORMAL-MODEL.md)) |
 | `crates/zk`, `crates/privacy`, `adapters/wasm` | partial skeletons, not working backends |
@@ -77,7 +77,7 @@ To move the release lock forward, run `cargo update -p p2p-net`, review the diff
 ## Trust model
 
 One authenticated, reproducible fraud witness is enough to prove a violation. A witness
-cannot force an opponent to send, reveal or co-sign, so a malicious opponent can stall a
+cannot force a participant to send, reveal or co-sign, so a malicious participant can stall a
 match; a timeout is suspicion, never proof. Publishing a package commitment proves
 publication, not guilt ([docs/38](docs/38-EVIDENCE-EXPORT.md)).
 

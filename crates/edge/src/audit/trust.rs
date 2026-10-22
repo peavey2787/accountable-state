@@ -7,7 +7,7 @@
 //! available the result is an explicit `Unresolved` state, never a silent adoption.
 use super::fsync::replace_file;
 use super::log::{AuditLog, Authenticator, LogError};
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, MatchId, ParticipantId};
 use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::io;
@@ -101,10 +101,10 @@ impl Pins {
     pub fn items(&self) -> &[Authenticator] {
         &self.items
     }
-    pub fn for_owner(&self, owner: PlayerId) -> impl Iterator<Item = &Authenticator> {
+    pub fn for_owner(&self, owner: ParticipantId) -> impl Iterator<Item = &Authenticator> {
         self.items.iter().filter(move |a| a.owner == owner)
     }
-    pub fn highest(&self, owner: PlayerId) -> Option<&Authenticator> {
+    pub fn highest(&self, owner: ParticipantId) -> Option<&Authenticator> {
         self.for_owner(owner).max_by_key(|a| a.seq)
     }
     /// Verify and pin. Keeps the `PER_OWNER` highest per owner so storage stays bounded.
@@ -233,7 +233,7 @@ impl Recovery {
 /// Decide whether `log` may be adopted given `anchors` (heads signed by `me`, from the local pin
 /// file or handed back by peers and witnesses). Pure; used by the auditor and by tests.
 pub fn check_log(
-    me: PlayerId,
+    me: ParticipantId,
     match_id: MatchId,
     log: Option<&AuditLog>,
     anchors: &[Authenticator],

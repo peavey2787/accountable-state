@@ -1,139 +1,142 @@
 use super::*;
-use gv_codec::{ControlChange, PackedControls, SignedPackedControls};
-use gv_core::{Digest, PlayerId};
-use gv_replay::{RuleError, StateMachine, ViolationCode};
+use crate::testkit::{GridRules, GridState, LEFT, RIGHT};
+use gv_codec::{EventBatch, EventBody, HeldChange, SignedEventBatch};
+use gv_core::{Certification, Ordering, Participant, Roster, Session};
 use gv_sig::SigningKey;
 
-#[derive(Clone)]
-struct MoveRules {
-    roster: [PlayerId; 2],
+const MATCH: [u8; 32] = [4; 32];
+
+fn controls(c: u16) -> Vec<u8> {
+    c.to_le_bytes().to_vec()
 }
-impl StateMachine for MoveRules {
-    fn ruleset_hash(&self) -> Digest {
-        [7; 32]
-    }
-    fn genesis(&self, _: &[PlayerId; 2]) -> Vec<u8> {
-        vec![0; 16]
-    }
-    fn apply(&self, s: &[u8], i: &[u8]) -> Result<Vec<u8>, RuleError> {
-        let invalid = || RuleError::InvalidAction(ViolationCode(1));
-        if s.len() != 16 || i.len() != 42 {
-            return Err(invalid());
-        }
-        let idx = self
-            .roster
-            .iter()
-            .position(|p| p[..] == i[..32])
-            .ok_or_else(invalid)?;
-        let control = u16::from_le_bytes([i[40], i[41]]);
-        if control & !3 != 0 || control == 3 {
-            return Err(invalid());
-        }
-        let mut out = s.to_vec();
-        let mut xy = [0u8; 8];
-        xy.copy_from_slice(&out[idx * 8..idx * 8 + 8]);
-        let x = i64::from_le_bytes(xy);
-        let dx = match control {
-            1 => 1,
-            2 => -1,
-            _ => 0,
-        };
-        let new = x.checked_add(dx).ok_or_else(invalid)?;
-        out[idx * 8..idx * 8 + 8].copy_from_slice(&new.to_le_bytes());
-        Ok(out)
-    }
-}
-fn signed(
-    key: &SigningKey,
-    match_id: [u8; 32],
-    start: u64,
-    previous: [u8; 32],
-    first: u16,
-    changes: Vec<ControlChange>,
-) -> SignedPackedControls {
-    SignedPackedControls::sign(
-        PackedControls {
-            match_id,
-            player: key.id(),
-            previous_batch_hash: previous,
-            start_tick: start,
+
+fn signed(key: &SigningKey, initial: u16, changes: Vec<HeldChange>) -> SignedEventBatch {
+    SignedEventBatch::sign(
+        EventBatch {
+            match_id: MATCH,
+            participant: key.id(),
+            previous_batch_hash: [0; 32],
+            start_tick: 0,
             tick_count: 4,
-            control_bytes: 1,
-            initial_state: first,
-            changes,
+            body: EventBody::Held {
+                initial: controls(initial),
+                changes,
+            },
         },
         key,
     )
     .unwrap()
 }
+
+fn keys() -> [SigningKey; 3] {
+    [9u8, 11, 13].map(|s| SigningKey::from_seed([s; 32]))
+}
+
+fn session(keys: &[SigningKey; 3]) -> Session {
+    let roster = Roster::new(
+        keys.iter()
+            .map(|k| Participant::player(k.id(), 0))
+            .collect(),
+    )
+    .unwrap();
+    Session::new(
+        MATCH,
+        roster,
+        Certification::Unanimous,
+        Ordering::Roster,
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// Batches in roster order, with a real change in the first one.
+fn batches(keys: &[SigningKey; 3], session: &Session) -> Vec<Option<SignedEventBatch>> {
+    let change = vec![HeldChange {
+        offset: 2,
+        payload: controls(0),
+    }];
+    session
+        .roster
+        .participants()
+        .iter()
+        .enumerate()
+        .map(|(slot, p)| {
+            let key = keys.iter().find(|k| k.id() == p.id).unwrap();
+            Some(match slot {
+                0 => signed(key, LEFT, change.clone()),
+                1 => signed(key, RIGHT, vec![]),
+                _ => signed(key, 0, vec![]),
+            })
+        })
+        .collect()
+}
+
 #[test]
 fn independent_replicas_and_fraud() {
-    let alice = SigningKey::from_seed([9; 32]);
-    let bob = SigningKey::from_seed([11; 32]);
-    let mut roster = [alice.id(), bob.id()];
-    roster.sort();
-    let rules = MoveRules { roster };
-    let mut a = MatchReplica::new([4; 32], roster, rules.clone()).unwrap();
-    let mut b = MatchReplica::new([4; 32], roster, rules.clone()).unwrap();
-    let batch_a = signed(
-        &alice,
-        [4; 32],
-        0,
-        [0; 32],
-        1,
-        vec![ControlChange {
-            offset: 2,
-            state: 0,
-        }],
-    );
-    let batch_b = signed(&bob, [4; 32], 0, [0; 32], 2, vec![]);
-    a.admit(batch_a.clone()).unwrap();
-    a.admit(batch_b.clone()).unwrap();
-    b.admit(batch_b.clone()).unwrap();
-    b.admit(batch_a.clone()).unwrap();
+    let keys = keys();
+    let session = session(&keys);
+    let rules = GridRules;
+    let mut replicas: Vec<_> = (0..3)
+        .map(|_| MatchReplica::new(session.clone(), rules).unwrap())
+        .collect();
+    let inputs = batches(&keys, &session);
+    for (n, r) in replicas.iter_mut().enumerate() {
+        // Admission order must not matter.
+        let mut order: Vec<_> = inputs.iter().flatten().cloned().collect();
+        order.rotate_left(n);
+        for b in order {
+            r.admit(b).unwrap();
+        }
+    }
+    let expected = replicas[0].candidate().unwrap();
+    assert!(replicas
+        .iter()
+        .all(|r| r.candidate().unwrap().checkpoint == expected.checkpoint));
+    let sigs: Vec<_> = replicas
+        .iter()
+        .zip(&keys_in_roster_order(&keys, &session))
+        .map(|(r, k)| r.sign_candidate(k).unwrap())
+        .collect();
+    let heads: Vec<_> = replicas
+        .iter_mut()
+        .map(|r| r.finalize(sigs.clone()).unwrap())
+        .collect();
+    assert!(heads.windows(2).all(|w| w[0] == w[1]));
+    assert_eq!(replicas[0].state(), replicas[1].state());
+    assert_eq!(replicas[0].next_tick(), 4);
+    let state = GridState::decode(replicas[0].state()).unwrap();
+    assert_eq!(state.walkers.len(), 3);
+
+    let cert = CertifiedEpoch::from_accepted(&replicas[0].accepted()[0], &session).unwrap();
+    let prev_state = expected.checkpoint.previous_state;
     assert_eq!(
-        a.candidate().unwrap().checkpoint,
-        b.candidate().unwrap().checkpoint
-    );
-    let expected = a.candidate().unwrap();
-    let sig_alice = a.sign_candidate(&alice).unwrap();
-    let sig_bob = b.sign_candidate(&bob).unwrap();
-    let mut signatures = [sig_alice.clone(), sig_bob];
-    signatures.sort_by_key(|s| s.player);
-    assert_eq!(
-        a.finalize(signatures.clone()).unwrap(),
-        b.finalize(signatures).unwrap()
-    );
-    assert_eq!(a.state(), b.state());
-    assert_eq!(a.next_tick(), 4);
-    let cert = CertifiedEpoch::from_accepted(&a.accepted()[0], roster).unwrap();
-    assert_eq!(
-        cert.verify(&rules, [0; 32], expected.checkpoint.previous_state),
+        cert.verify(&rules, [0; 32], prev_state),
         EvidenceVerdict::ValidClaim
     );
     let serialized = cert.encode().unwrap();
     let recovered = CertifiedEpoch::decode(&serialized).unwrap();
     assert_eq!(
-        recovered.verify(&rules, [0; 32], expected.checkpoint.previous_state),
+        recovered.verify(&rules, [0; 32], prev_state),
         EvidenceVerdict::ValidClaim
     );
     let mut corrupted = serialized;
     let last = corrupted.len() - 1;
     corrupted[last] ^= 1;
     assert!(CertifiedEpoch::decode(&corrupted).is_err());
-    let opening = vec![0; 16];
-    let order = if batch_a.record.player < batch_b.record.player {
-        [batch_a, batch_b]
-    } else {
-        [batch_b, batch_a]
-    };
+
+    let genesis = rules.genesis(&session);
+    let accused_key = &keys[0];
     let valid = CheckpointEvidence {
         trusted_previous_checkpoint: [0; 32],
-        trusted_previous_state: expected.checkpoint.previous_state,
-        accused: sig_alice,
-        previous_state: opening,
-        player_batches: order.clone(),
-        roster,
+        trusted_previous_state: prev_state,
+        accused: sigs
+            .iter()
+            .find(|s| s.signer == accused_key.id())
+            .unwrap()
+            .clone(),
+        previous_state: genesis,
+        session: session.clone(),
+        inputs,
     };
     assert_eq!(
         verify_checkpoint_evidence(&rules, &valid),
@@ -142,7 +145,7 @@ fn independent_replicas_and_fraud() {
     let mut false_checkpoint = expected.checkpoint.clone();
     false_checkpoint.next_state = [0xa5; 32];
     let fake = CheckpointEvidence {
-        accused: SignedCheckpoint::sign(false_checkpoint, &alice),
+        accused: SignedCheckpoint::sign(false_checkpoint, accused_key),
         ..valid
     };
     assert_eq!(
@@ -150,7 +153,11 @@ fn independent_replicas_and_fraud() {
         EvidenceVerdict::ProvenInvalidState
     );
     let mut tampered = fake.clone();
-    tampered.player_batches[0].record.initial_state ^= 1;
+    if let Some(Some(b)) = tampered.inputs.first_mut() {
+        if let EventBody::Held { initial, .. } = &mut b.record.body {
+            initial[0] ^= 1;
+        }
+    }
     assert!(matches!(
         verify_checkpoint_evidence(&rules, &tampered),
         EvidenceVerdict::Inconclusive(_)
@@ -161,4 +168,13 @@ fn independent_replicas_and_fraud() {
         verify_checkpoint_evidence(&rules, &fabricated),
         EvidenceVerdict::Inconclusive(CheckpointError::InvalidHistory)
     );
+}
+
+fn keys_in_roster_order(keys: &[SigningKey; 3], session: &Session) -> Vec<SigningKey> {
+    session
+        .roster
+        .participants()
+        .iter()
+        .map(|p| keys.iter().find(|k| k.id() == p.id).unwrap().clone())
+        .collect()
 }

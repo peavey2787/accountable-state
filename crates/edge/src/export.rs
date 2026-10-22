@@ -4,7 +4,7 @@
 //! artifacts the engine already produces (certified match archive, fraud bundle, input-violation
 //! evidence, accountability evidence, audit records) in a canonical, bounded, domain-separated
 //! envelope. Packages carry no secrets and no signature of their own: authenticity comes from the
-//! signatures inside the payload, so a verifier needs only the pinned match id, ruleset and roster.
+//! signatures inside the payload, so a verifier needs only the pinned match id, ruleset and session.
 //!
 //! A [`Commitment`] is a 32-byte identifier of a package. Publishing a commitment anywhere (a
 //! file, an object store, a settlement system) **proves publication of a digest, not fraud**:
@@ -14,7 +14,7 @@ use crate::{
     evidence_violations, CertifiedMatch, CheckpointEvidence, EvidenceVerdict, FraudBundle,
     StateMachine,
 };
-use gv_core::{Digest, MatchId, PlayerId};
+use gv_core::{Digest, MatchId, ParticipantId, Roster, Session, MAX_SESSION_BYTES};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 
@@ -87,12 +87,8 @@ impl DisclosurePolicy {
 pub struct TrustAnchor {
     pub match_id: MatchId,
     pub ruleset: Digest,
-    pub roster: [PlayerId; 2],
-}
-
-fn sorted(mut r: [PlayerId; 2]) -> [PlayerId; 2] {
-    r.sort();
-    r
+    /// Digest of the pinned session: binds the roster, certification policy and parameters.
+    pub session: Digest,
 }
 
 /// Compact commitment to a package. 32-byte `id`, plus the metadata a consumer needs without
@@ -165,7 +161,7 @@ pub struct Package {
     fraud: Option<FraudKind>,
     match_id: MatchId,
     ruleset: Digest,
-    roster: [PlayerId; 2],
+    session: Session,
     inputs_disclosed: bool,
     payload: Vec<u8>,
 }
@@ -205,8 +201,7 @@ impl Package {
         s.update([u8::from(self.inputs_disclosed)]);
         s.update(self.match_id);
         s.update(self.ruleset);
-        s.update(self.roster[0]);
-        s.update(self.roster[1]);
+        s.update(self.session.digest());
         s.update(payload_hash(&self.payload));
         s.finalize().into()
     }
@@ -227,12 +222,12 @@ impl Package {
         o.push(u8::from(self.inputs_disclosed));
         o.extend_from_slice(&self.match_id);
         o.extend_from_slice(&self.ruleset);
-        for p in &self.roster {
-            o.extend_from_slice(p);
-        }
-        // Verifying keys are public and self-authenticating (PlayerId = H(key)).
-        for p in &self.roster {
-            let vk = gv_sig::public_key_bytes(p).ok_or(ExportError::Invalid)?;
+        let session = self.session.encode();
+        o.extend_from_slice(&(session.len() as u32).to_le_bytes());
+        o.extend_from_slice(&session);
+        // Verifying keys are public and self-authenticating (ParticipantId = H(key)).
+        for p in self.session.roster.participants() {
+            let vk = gv_sig::public_key_bytes(&p.id).ok_or(ExportError::Invalid)?;
             o.extend_from_slice(&vk);
         }
         o.extend_from_slice(&(self.payload.len() as u64).to_le_bytes());
@@ -252,14 +247,13 @@ impl Package {
         let r = b
             .strip_prefix(PACKAGE_MAGIC)
             .ok_or(ExportError::Malformed)?;
-        let fixed = 3 + 32 * 4 + 2 * VK_LEN + 8;
-        if r.len() < fixed + 32 {
+        if r.len() < 3 {
             return Err(ExportError::Malformed);
         }
-        let kind = match r[0] {
-            1 => PackageKind::MatchArchive,
-            2 => PackageKind::FraudWitness,
-            3 => PackageKind::Audit,
+        let kind = match r.first() {
+            Some(1) => PackageKind::MatchArchive,
+            Some(2) => PackageKind::FraudWitness,
+            Some(3) => PackageKind::Audit,
             _ => return Err(ExportError::Malformed),
         };
         let fraud = match (kind, r[1]) {
@@ -275,34 +269,29 @@ impl Package {
             1 => true,
             _ => return Err(ExportError::Malformed),
         };
-        let d = |i: usize| -> Digest {
-            r[3 + 32 * i..3 + 32 * (i + 1)]
-                .try_into()
-                .unwrap_or([0; 32])
-        };
-        let (match_id, ruleset, roster) = (d(0), d(1), [d(2), d(3)]);
-        if roster[0] >= roster[1] {
-            return Err(ExportError::Malformed); // canonical: sorted and distinct
+        let mut rd = Rd(&r[3..]);
+        let match_id = take_digest(&mut rd)?;
+        let ruleset = take_digest(&mut rd)?;
+        let session_len = rd.u32()?;
+        if session_len > MAX_SESSION_BYTES {
+            return Err(ExportError::TooLarge);
         }
-        let vk_at = 3 + 32 * 4;
-        for (i, id) in roster.iter().enumerate() {
-            let vk = &r[vk_at + i * VK_LEN..vk_at + (i + 1) * VK_LEN];
-            if gv_sig::register_key(vk).map_err(|_| ExportError::Malformed)? != *id {
+        let session = Session::decode(rd.take(session_len)?).map_err(|_| ExportError::Malformed)?;
+        if session.match_id != match_id {
+            return Err(ExportError::Malformed);
+        }
+        for p in session.roster.participants() {
+            let vk = rd.take(VK_LEN)?;
+            if gv_sig::register_key(vk).map_err(|_| ExportError::Malformed)? != p.id {
                 return Err(ExportError::Invalid);
             }
         }
-        let len_at = vk_at + 2 * VK_LEN;
-        let len = u64::from_le_bytes(
-            r[len_at..len_at + 8]
-                .try_into()
-                .map_err(|_| ExportError::Malformed)?,
-        );
-        let len = usize::try_from(len).map_err(|_| ExportError::TooLarge)?;
-        if r.len() != fixed + len + 32 {
-            return Err(ExportError::Malformed);
-        }
-        let payload = r[fixed..fixed + len].to_vec();
-        if r[fixed + len..] != payload_hash(&payload) {
+        let len = usize::try_from(u64::from_le_bytes(
+            rd.take(8)?.try_into().map_err(|_| ExportError::Malformed)?,
+        ))
+        .map_err(|_| ExportError::TooLarge)?;
+        let payload = rd.take(len)?.to_vec();
+        if rd.take(32)? != payload_hash(&payload) || !rd.0.is_empty() {
             return Err(ExportError::Invalid);
         }
         Ok(Self {
@@ -310,36 +299,34 @@ impl Package {
             fraud,
             match_id,
             ruleset,
-            roster,
+            session,
             inputs_disclosed,
             payload,
         })
     }
 }
 
-fn context<R: StateMachine>(rules: &R, roster: [PlayerId; 2]) -> (Digest, [PlayerId; 2]) {
-    (rules.ruleset_hash(), sorted(roster))
+fn take_digest(rd: &mut Rd<'_>) -> Result<Digest, ExportError> {
+    rd.take(32)?.try_into().map_err(|_| ExportError::Malformed)
 }
 
 /// Export a complete certified match: everything an independent party needs to replay it.
 pub fn export_match<R: StateMachine>(
     rules: &R,
-    match_id: MatchId,
-    roster: [PlayerId; 2],
+    session: &Session,
     archive: &CertifiedMatch,
     policy: DisclosurePolicy,
 ) -> Result<Package, ExportError> {
     if !policy.allows_inputs() {
         return Err(ExportError::DisclosureForbidden);
     }
-    let (ruleset, roster) = context(rules, roster);
     let payload = archive.encode().map_err(|_| ExportError::Invalid)?;
     Ok(Package {
         kind: PackageKind::MatchArchive,
         fraud: None,
-        match_id,
-        ruleset,
-        roster,
+        match_id: session.match_id,
+        ruleset: rules.ruleset_hash(),
+        session: session.clone(),
         inputs_disclosed: true,
         payload,
     })
@@ -354,12 +341,10 @@ pub enum FraudWitness<'a> {
 
 pub fn export_fraud<R: StateMachine>(
     rules: &R,
-    match_id: MatchId,
-    roster: [PlayerId; 2],
+    session: &Session,
     witness: FraudWitness<'_>,
     policy: DisclosurePolicy,
 ) -> Result<Package, ExportError> {
-    let (ruleset, roster) = context(rules, roster);
     let (fraud, payload, inputs) = match witness {
         FraudWitness::FalseCheckpoint(b) => (
             FraudKind::FalseCheckpoint,
@@ -383,9 +368,9 @@ pub fn export_fraud<R: StateMachine>(
     Ok(Package {
         kind: PackageKind::FraudWitness,
         fraud: Some(fraud),
-        match_id,
-        ruleset,
-        roster,
+        match_id: session.match_id,
+        ruleset: rules.ruleset_hash(),
+        session: session.clone(),
         inputs_disclosed: inputs,
         payload,
     })
@@ -519,8 +504,7 @@ impl AuditExport {
 /// Export audit history. Evidence inside is re-verified on import; nothing is trusted.
 pub fn export_audit<R: StateMachine>(
     rules: &R,
-    match_id: MatchId,
-    roster: [PlayerId; 2],
+    session: &Session,
     audit: &AuditExport,
     policy: DisclosurePolicy,
 ) -> Result<Package, ExportError> {
@@ -531,13 +515,12 @@ pub fn export_audit<R: StateMachine>(
     if has_batches && !policy.allows_inputs() {
         return Err(ExportError::DisclosureForbidden);
     }
-    let (ruleset, roster) = context(rules, roster);
     Ok(Package {
         kind: PackageKind::Audit,
         fraud: None,
-        match_id,
-        ruleset,
-        roster,
+        match_id: session.match_id,
+        ruleset: rules.ruleset_hash(),
+        session: session.clone(),
         inputs_disclosed: has_batches,
         payload: audit.encode()?,
     })
@@ -552,18 +535,21 @@ pub enum Verified {
         epochs: usize,
         /// Of those, epochs closed by proven fraud (explicit gaps between certified runs).
         disputed: usize,
-        /// Maximal runs of dual-signed epochs.
+        /// Maximal runs of certified epochs.
         segments: usize,
     },
     /// The package proves misbehavior by `accused`.
-    Fraud { kind: FraudKind, accused: PlayerId },
+    Fraud {
+        kind: FraudKind,
+        accused: ParticipantId,
+    },
     Audit {
         authenticators: usize,
         segments: usize,
         challenges: usize,
         responses: usize,
-        /// Players with verified equivocation evidence.
-        proven: Vec<PlayerId>,
+        /// Participants with verified equivocation evidence.
+        proven: Vec<ParticipantId>,
     },
 }
 
@@ -577,7 +563,7 @@ pub fn verify_package<R: StateMachine + Clone>(
     if pkg.match_id != anchor.match_id
         || pkg.ruleset != anchor.ruleset
         || pkg.ruleset != rules.ruleset_hash()
-        || pkg.roster != sorted(anchor.roster)
+        || pkg.session.digest() != anchor.session
     {
         return Err(ExportError::WrongContext);
     }
@@ -590,12 +576,13 @@ fn verify_payload<R: StateMachine + Clone>(
     anchor: &TrustAnchor,
     rules: &R,
 ) -> Result<Verified, ExportError> {
-    let roster = pkg.roster;
+    let session = &pkg.session;
+    let roster = &session.roster;
     match pkg.kind {
         PackageKind::MatchArchive => {
             let archive = CertifiedMatch::decode(&pkg.payload).map_err(|_| ExportError::Invalid)?;
             let replica = archive
-                .restore(anchor.match_id, roster, rules.clone())
+                .restore(session.clone(), rules.clone())
                 .map_err(|_| ExportError::Invalid)?;
             Ok(Verified::Match {
                 ticks: replica.next_tick(),
@@ -607,7 +594,7 @@ fn verify_payload<R: StateMachine + Clone>(
         PackageKind::FraudWitness => match pkg.fraud {
             Some(FraudKind::FalseCheckpoint) => {
                 let bundle = FraudBundle::decode(&pkg.payload).map_err(|_| ExportError::Invalid)?;
-                match bundle.verify(anchor.match_id, roster, rules.clone()) {
+                match bundle.verify(session.clone(), rules.clone()) {
                     EvidenceVerdict::ProvenInvalidState => Ok(Verified::Fraud {
                         kind: FraudKind::FalseCheckpoint,
                         accused: bundle_accused(&bundle),
@@ -619,14 +606,14 @@ fn verify_payload<R: StateMachine + Clone>(
             Some(FraudKind::IllegalInput) => {
                 let ev =
                     CheckpointEvidence::decode(&pkg.payload).map_err(|_| ExportError::Invalid)?;
-                if ev.roster != roster || ev.accused.claim.match_id != anchor.match_id {
+                if ev.session != *session || ev.accused.claim.match_id != anchor.match_id {
                     return Err(ExportError::WrongContext);
                 }
                 let v = evidence_violations(rules, &ev).map_err(|_| ExportError::Invalid)?;
                 let first = v.first().ok_or(ExportError::NotAViolation)?;
                 Ok(Verified::Fraud {
                     kind: FraudKind::IllegalInput,
-                    accused: first.player,
+                    accused: first.participant,
                 })
             }
             Some(FraudKind::Equivocation) => {
@@ -644,17 +631,20 @@ fn verify_payload<R: StateMachine + Clone>(
             }
             None => Err(ExportError::Malformed),
         },
-        PackageKind::Audit => verify_audit(&AuditExport::decode(&pkg.payload)?, anchor),
+        PackageKind::Audit => verify_audit(&AuditExport::decode(&pkg.payload)?, anchor, roster),
     }
 }
 
-fn bundle_accused(b: &FraudBundle) -> PlayerId {
-    b.allegation.accused.player
+fn bundle_accused(b: &FraudBundle) -> ParticipantId {
+    b.allegation.accused.signer
 }
 
-fn verify_audit(a: &AuditExport, anchor: &TrustAnchor) -> Result<Verified, ExportError> {
-    let roster = sorted(anchor.roster);
-    let mut heads: BTreeSet<(PlayerId, u64, Digest)> = BTreeSet::new();
+fn verify_audit(
+    a: &AuditExport,
+    anchor: &TrustAnchor,
+    roster: &Roster,
+) -> Result<Verified, ExportError> {
+    let mut heads: BTreeSet<(ParticipantId, u64, Digest)> = BTreeSet::new();
     for x in &a.authenticators {
         x.verify().map_err(|_| ExportError::Invalid)?;
         if x.match_id != anchor.match_id
@@ -717,10 +707,10 @@ fn verify_audit(a: &AuditExport, anchor: &TrustAnchor) -> Result<Verified, Expor
 pub enum ExportEvent {
     /// New verified evidence; `commitment` identifies the exportable package.
     Evidence {
-        accused: PlayerId,
+        accused: ParticipantId,
         commitment: Commitment,
     },
-    /// A checkpoint both players signed.
+    /// A checkpoint that satisfied the session's certification policy.
     Checkpoint { epoch_start: u64, hash: Digest },
     /// A challenge changed state. Only a cryptographic proof is a cheating verdict; a timeout
     /// is reported as SUSPECTED_NONCOOPERATION or UNAVAILABLE, never as fraud.

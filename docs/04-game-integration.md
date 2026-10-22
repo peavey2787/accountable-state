@@ -30,7 +30,7 @@ The SDK trait (`accountable_state::StateMachine`):
 ```rust
 pub trait StateMachine {
     fn ruleset_hash(&self) -> Digest;
-    fn genesis(&self, roster: &[PlayerId; 2]) -> Vec<u8>;
+    fn genesis(&self, roster: &[ParticipantId; 2]) -> Vec<u8>;
     fn apply(&self, state: &[u8], input: &[u8]) -> Result<Vec<u8>, RuleError>;
     fn ordering(&self, action: u16) -> ActionOrdering { ActionOrdering::MergeSafe }
 }

@@ -1,4 +1,4 @@
-use gv_core::PlayerId;
+use gv_core::ParticipantId;
 use gv_edge::export::{verify_package, Commitment, ExportError, FraudKind, TrustAnchor, Verified};
 use gv_replay::StateMachine;
 
@@ -19,7 +19,7 @@ pub struct VerifiedProof {
     pub commitment: Commitment,
     /// `None` for an audit record that carries proven equivocation.
     pub kind: Option<FraudKind>,
-    pub accused: Vec<PlayerId>,
+    pub accused: Vec<ParticipantId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
