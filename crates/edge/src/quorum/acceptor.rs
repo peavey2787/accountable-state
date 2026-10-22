@@ -7,6 +7,7 @@ use super::set::Ballot;
 use super::wire::{Claim, Nack, Promise, QuorumMsg, Receipt, Recover};
 use gv_core::{MatchId, ParticipantId};
 use gv_sig::SigningKey;
+use std::collections::VecDeque;
 
 /// Why a `Store` was not receipted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,12 +18,24 @@ pub enum Refusal {
     Stale,
 }
 
+/// Claims remembered per owner so peers can fetch the receipt for a head they saw. Memory only:
+/// after a witness restart the ring is empty and peers ask the other witnesses.
+const RECENT: usize = 16;
+
 /// Durable per-owner state. Opaque bytes to the caller; see [`Cell::encode`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct Cell {
     promised: Option<Ballot>,
     accepted: Option<Claim>,
+    recent: VecDeque<Claim>,
 }
+
+impl PartialEq for Cell {
+    fn eq(&self, other: &Self) -> bool {
+        self.promised == other.promised && self.accepted == other.accepted
+    }
+}
+impl Eq for Cell {}
 
 impl Cell {
     pub fn encode(&self) -> Vec<u8> {
@@ -56,13 +69,23 @@ impl Cell {
         } else {
             Some(Claim::decode(rest).ok()?)
         };
-        Some(Self { promised, accepted })
+        Some(Self {
+            promised,
+            accepted,
+            recent: VecDeque::new(),
+        })
     }
     pub fn promised(&self) -> Option<Ballot> {
         self.promised
     }
     pub fn accepted(&self) -> Option<&Claim> {
         self.accepted.as_ref()
+    }
+    fn remember(&mut self, c: &Claim) {
+        if self.recent.len() >= RECENT {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(c.clone());
     }
     fn floor(&self) -> Option<Ballot> {
         self.promised
@@ -82,7 +105,8 @@ impl Cell {
             return Ok(());
         }
         match claim.auth.seq.cmp(&held.auth.seq) {
-            std::cmp::Ordering::Greater => Ok(()),
+            std::cmp::Ordering::Greater if claim.through_tick >= held.through_tick => Ok(()),
+            std::cmp::Ordering::Greater => Err(Refusal::Stale),
             std::cmp::Ordering::Less => Err(Refusal::Stale),
             std::cmp::Ordering::Equal if claim.auth.head != held.auth.head => {
                 Err(Refusal::Conflict)
@@ -156,6 +180,7 @@ impl Acceptor {
             *cell = before;
             return None;
         }
+        cell.remember(c);
         Some(QuorumMsg::Receipt(Receipt::sign(c, &self.key)))
     }
 
@@ -163,12 +188,15 @@ impl Acceptor {
         QuorumMsg::Nack(Nack::sign(m, o, refused, promised, &self.key))
     }
 
-    /// Answer a `HeldReq`: the accepted claim if it is at least `seq`, with this witness's receipt.
-    pub fn held(&self, cell: &Cell, seq: u64) -> Option<QuorumMsg> {
-        let claim = cell.accepted.as_ref().filter(|c| c.auth.seq >= seq)?;
-        Some(QuorumMsg::Held {
-            claim: claim.clone(),
-            receipt: Receipt::sign(claim, &self.key),
-        })
+    /// Answer a `HeldReq`: every remembered claim at `seq`, each with this witness's receipt.
+    pub fn held(&self, cell: &Cell, seq: u64) -> Vec<QuorumMsg> {
+        cell.recent
+            .iter()
+            .filter(|c| c.auth.seq == seq)
+            .map(|claim| QuorumMsg::Held {
+                claim: claim.clone(),
+                receipt: Receipt::sign(claim, &self.key),
+            })
+            .collect()
     }
 }

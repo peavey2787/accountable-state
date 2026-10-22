@@ -68,8 +68,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         }
         let sent = self.claim_to_send(&epoch.checkpoint, &honest);
         self.auditor.record_my_checkpoint(&sent);
-        self.outbox
-            .push_back(Outgoing::all(PipeMsg::Checkpoint(sent.clone())));
+        self.enqueue(Outgoing::all(PipeMsg::Checkpoint(sent.clone())));
         let end = start + u64::from(epoch.checkpoint.epoch_length);
         let mut cert = Box::new(Certify {
             start,

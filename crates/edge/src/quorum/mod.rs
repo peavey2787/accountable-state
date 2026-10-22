@@ -8,6 +8,7 @@
 //! the newest committed claim (two quorums share an honest witness). Fewer than a quorum is the
 //! explicit blocked state: the owner waits, it never resumes on a timeout.
 pub mod acceptor;
+pub mod gather;
 pub mod registrar;
 pub mod set;
 #[cfg(test)]
@@ -15,6 +16,7 @@ mod tests;
 pub mod wire;
 
 pub use acceptor::{Acceptor, Cell, Refusal};
+pub use gather::Gatherer;
 pub use registrar::{Event, Phase, Registrar};
 pub use set::{Ballot, WitnessSet, MAX_WITNESSES};
 pub use wire::{Certificate, Claim, Nack, Promise, QuorumError, QuorumMsg, Receipt, Recover};

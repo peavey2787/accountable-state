@@ -161,6 +161,9 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         }
         let slot = self.my_slot()?;
         let ws = self.ws();
+        if ws < self.auditor.sign_floor() {
+            return None; // a previous incarnation's committed head covers these ticks
+        }
         let head = self.replica.next_batch_head(self.me)?;
         let inputs = own(ws, end).filter(|i| i.len() as u64 == end - ws)?;
         let b = pack(self.session.match_id, self.me, head, ws, &inputs, &self.key)?;
@@ -175,7 +178,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             return;
         }
         if let Some(b) = self.sign_batch(end, own) {
-            self.outbox.push_back(Outgoing::all(PipeMsg::Batch(b)));
+            self.enqueue(Outgoing::all(PipeMsg::Batch(b)));
         }
     }
     /// An end I may sign: never longer than one I already signed.
@@ -228,7 +231,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             return;
         }
         if let Some(b) = self.sign_batch(end, own) {
-            self.outbox.push_back(Outgoing::all(PipeMsg::Batch(b)));
+            self.enqueue(Outgoing::all(PipeMsg::Batch(b)));
             self.try_complete(now);
         }
     }
@@ -423,8 +426,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             attempt,
             batches,
         };
-        self.outbox
-            .push_back(Outgoing::all(PipeMsg::Close(close.clone())));
+        self.enqueue(Outgoing::all(PipeMsg::Close(close.clone())));
         self.adopt_close(&close, now);
     }
     pub(super) fn on_close(&mut self, from: ParticipantId, close: Close, now: u64) {

@@ -3,6 +3,7 @@
 //! Replaying the same evidence set in any order yields the same verdicts.
 use super::challenge::Status;
 use super::evidence::{Evidence, EvidenceError, Proof};
+use crate::quorum::WitnessSet;
 use crate::{verify_checkpoint_evidence_with, CertifiedEpoch, CheckpointEvidence, EvidenceVerdict};
 use gv_core::{Digest, MatchId, ParticipantId};
 use gv_replay::StateMachine;
@@ -35,6 +36,8 @@ pub struct Ledger {
     exonerated: BTreeSet<Digest>,
     /// Non-proof statuses (suspicion/cleared), by accused.
     soft: BTreeMap<ParticipantId, Status>,
+    /// Pinned witness set: log-equivocation evidence must then carry quorum certificates.
+    witnesses: Option<WitnessSet>,
 }
 
 fn replay_id(e: &CheckpointEvidence) -> Digest {
@@ -50,6 +53,13 @@ fn replay_id(e: &CheckpointEvidence) -> Digest {
 impl Ledger {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// A ledger that convicts for log equivocation only on quorum-certified heads.
+    pub fn with_witnesses(set: WitnessSet) -> Self {
+        Self {
+            witnesses: Some(set),
+            ..Self::default()
+        }
     }
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -81,7 +91,7 @@ impl Ledger {
             Ok(id) => id,
             Err(x) => return Outcome::Rejected(x),
         };
-        let Proof::Equivocation(p) = match e.verify() {
+        let Proof::Equivocation(p) = match e.verify_under(self.witnesses.as_ref()) {
             Ok(p) => p,
             Err(x) => return Outcome::Rejected(x),
         };

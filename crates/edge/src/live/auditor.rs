@@ -2,6 +2,7 @@
 //! tamper-evident log, exchanges authenticators once per epoch, audits every other participant's
 //! chain with signed challenges, and records proven misbehavior in a deterministic ledger. It never blocks or delays play: every call is O(1)
 //! amortized and all network I/O is queued messages.
+use super::gate::Gate;
 use super::msg::{Outgoing, PipeMsg};
 use crate::audit::{
     challenge::{ChallengeBook, ChallengeGate, ChallengeKind, Response, Status, Timing},
@@ -9,12 +10,15 @@ use crate::audit::{
     trust::{check_log, PinError, Pins, Recovery, Refusal, Unresolved},
     AuditLog, Authenticator, Challenge, Evidence, Ledger, Outcome, Segment,
 };
+use crate::quorum::Ballot;
 use crate::SignedCheckpoint;
 use gv_codec::SignedEventBatch;
 use gv_core::{Digest, MatchId, ParticipantId, Roster};
 use gv_sig::SigningKey;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+mod quorum;
 
 const KIND_BATCH: u8 = 1;
 const KIND_CHECKPOINT: u8 = 2;
@@ -50,6 +54,10 @@ pub enum AuditEvent {
     /// The write-ahead store failed: nothing signed is released until it succeeds again.
     /// Not a verdict about anyone.
     PersistenceFailed(String),
+    /// A witness quorum answered: the head committed before the restart (if any) is adopted.
+    QuorumRecovered { seq: Option<u64> },
+    /// A newer incarnation of this participant exists: this one stopped signing. Not a verdict.
+    Fenced { newer: Ballot },
     /// Periodic telemetry (emitted by the host loop, not the auditor).
     Snapshot(AuditStats),
 }
@@ -136,6 +144,9 @@ pub struct Auditor {
     anchor: AnchorCheck,
     /// Peers that must answer an anchor check before signing resumes.
     anchor_quorum: usize,
+    /// Witness-quorum head register (recovery and release gate); `None` in peers-only mode.
+    register: Option<Gate>,
+    fenced: bool,
 }
 
 /// Who has answered the anchor check after a (re)start. Every peer receives every head I sign,
@@ -236,6 +247,8 @@ impl Auditor {
             commits: 0,
             anchor_pending: false,
             anchor: AnchorCheck::default(),
+            register: None,
+            fenced: false,
         })
     }
 
@@ -348,7 +361,9 @@ impl Auditor {
     pub fn require_anchor_check(&mut self) {
         self.anchor_pending = true;
         self.anchor = AnchorCheck::default();
-        self.outbox.push_back(Outgoing::all(PipeMsg::AnchorReq));
+        if self.register.is_none() {
+            self.outbox.push_back(Outgoing::all(PipeMsg::AnchorReq));
+        }
     }
     /// How many peers must answer an anchor check (default: all of them). Lowering it trades
     /// protection against a withheld newer head for liveness while peers are offline.
@@ -756,8 +771,14 @@ impl Auditor {
         {
             return; // fail closed: no new signed head while the write-ahead store is failing
         }
-        if !self.recovery.may_sign() {
+        if !self.recovery.may_sign() || self.fenced {
             return; // unresolved recovery: never sign a head that could contradict an earlier one
+        }
+        if self.register.is_some() {
+            let seq = self.log.len();
+            self.want_cover(now, seq);
+            self.pump_register();
+            return;
         }
         let a = self.log.sign_authenticator(self.ruleset, &self.key);
         self.pin(&a);
@@ -790,6 +811,7 @@ impl Auditor {
             self.outbox.push_back(Outgoing::all(PipeMsg::AnchorReq)); // a peer may not have been connected yet
         }
         self.finish_anchor_check();
+        self.pump_register();
         let expired: Vec<Digest> = self
             .gate_pins
             .iter()
@@ -826,6 +848,9 @@ impl Auditor {
     // ---- inbound ---------------------------------------------------------------
 
     fn submit(&mut self, e: &Evidence, announce: bool) {
+        if self.certify_finding(e) {
+            return;
+        }
         match self.ledger.submit(e, &self.roster) {
             Outcome::Recorded(_) => {
                 if let (Ok(id), Ok(evidence)) = (e.id(), e.encode()) {
@@ -924,7 +949,7 @@ impl Auditor {
         if (!self.peers.contains(&c.challenger) && !from_witness) || now < self.withhold_until {
             return;
         }
-        if !self.recovery.may_sign() || self.gate.accept(&c, now).is_err() {
+        if !self.recovery.may_sign() || self.fenced || self.gate.accept(&c, now).is_err() {
             return;
         }
         if let ChallengeKind::LogSegment { from, .. } = c.kind {
@@ -940,11 +965,7 @@ impl Auditor {
                 self.log.segment(from, to).ok().map(|s| s.encode())
             }
             ChallengeKind::MissingBatch { start_tick } => self.batches.get(&start_tick).cloned(),
-            ChallengeKind::Ack { .. } => Some(
-                self.log
-                    .sign_authenticator(self.ruleset, &self.key)
-                    .encode(),
-            ),
+            ChallengeKind::Ack { .. } => self.current_authenticator().map(|a| a.encode()),
             _ => app.answer(&c),
         };
         if let Some(p) = payload {

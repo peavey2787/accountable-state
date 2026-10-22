@@ -136,7 +136,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         nonce[8..].copy_from_slice(&start.to_le_bytes());
         let msg = SignedSeal::sign(self.session.match_id, start, ticks, nonce, &self.key);
         self.begin_window(&msg);
-        self.outbox.push_back(Outgoing::all(PipeMsg::Seal(msg)));
+        self.enqueue(Outgoing::all(PipeMsg::Seal(msg)));
         Ok(())
     }
     fn begin_window(&mut self, msg: &SignedSeal) {
@@ -305,8 +305,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         if let Ok(commit) = signed {
             if adm.admit_commit(commit.clone()).is_ok() {
                 cell.commits.insert(self.me, commit.clone());
-                self.outbox
-                    .push_back(Outgoing::all(PipeMsg::Commit(commit)));
+                self.enqueue(Outgoing::all(PipeMsg::Commit(commit)));
                 cell.my_commit_sent = true;
             }
         }
@@ -329,7 +328,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         if self.can_submit() && !cell.my_lock_sent && adm.commit_count() == submitters {
             if let Ok(lock) = adm.sign_lock(&self.key) {
                 if adm.admit_lock(lock.clone()).is_ok() {
-                    self.outbox.push_back(Outgoing::all(PipeMsg::Lock {
+                    self.enqueue(Outgoing::all(PipeMsg::Lock {
                         start_tick: cell.start,
                         lock,
                     }));
@@ -356,11 +355,10 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         };
         // Our own opening counts toward the certified set too.
         if adm.admit_reveal(b.clone(), &cell.blind).is_ok() {
-            self.outbox
-                .push_back(Outgoing::all(PipeMsg::Reveal(Opening {
-                    batch: b,
-                    blind: cell.blind,
-                })));
+            self.enqueue(Outgoing::all(PipeMsg::Reveal(Opening {
+                batch: b,
+                blind: cell.blind,
+            })));
             cell.my_reveal_sent = true;
         }
     }

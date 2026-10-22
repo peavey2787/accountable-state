@@ -29,6 +29,14 @@ use gv_sig::SigningKey;
 use sealed::Sealed;
 use std::collections::VecDeque;
 
+/// An outbound message and what must be committed before it may leave: a witness quorum must
+/// hold a head covering log position `seq` at tick `tick` (see [`Auditor::enable_witness_quorum`]).
+struct Stamped {
+    out: Outgoing,
+    tick: u64,
+    seq: u64,
+}
+
 pub struct Pipeline<R: StateMachine + Clone> {
     key: SigningKey,
     me: ParticipantId,
@@ -41,7 +49,8 @@ pub struct Pipeline<R: StateMachine + Clone> {
     early_ckpt: Vec<SignedCheckpoint>,
     cheat_pending: bool,
     sealed: Sealed,
-    outbox: VecDeque<Outgoing>,
+    outbox: VecDeque<Stamped>,
+    clock: u64,
     events: VecDeque<PipeEvent>,
     reported_inputs: Vec<(u64, ParticipantId)>,
     auditor: Auditor,
@@ -85,6 +94,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             cheat_pending: false,
             sealed: Sealed::default(),
             outbox: VecDeque::new(),
+            clock: 0,
             events: VecDeque::new(),
             reported_inputs: Vec::new(),
             auditor,
@@ -112,11 +122,23 @@ impl<R: StateMachine + Clone> Pipeline<R> {
     /// Next message to send. Nothing leaves before the write-ahead barrier: every log entry and
     /// signed head this participant has produced is durable first (`Auditor::make_durable`).
     /// A failing store withholds messages (fail closed) and is retried; play is unaffected.
+    /// In witnessed mode a signed message also waits for the quorum-committed head that covers it
+    /// (the release gate); messages that sign nothing new pass it.
     pub fn poll_outbox(&mut self) -> Option<Outgoing> {
         if self.outbox.is_empty() || !self.auditor.make_durable() {
             return None;
         }
-        self.outbox.pop_front()
+        let i = self
+            .outbox
+            .iter()
+            .position(|s| self.auditor.release_covers(s.tick, s.seq))?;
+        self.outbox.remove(i).map(|s| s.out)
+    }
+    /// Queue a signed message behind the release gate.
+    fn enqueue(&mut self, out: Outgoing) {
+        let (tick, seq) = (self.clock, self.auditor.log_len());
+        self.auditor.want_cover(tick, seq);
+        self.outbox.push_back(Stamped { out, tick, seq });
     }
     pub fn poll_event(&mut self) -> Option<PipeEvent> {
         self.events.pop_front()
@@ -145,6 +167,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
 
     /// Call after every simulated tick (`now` = number of ticks simulated).
     pub fn tick(&mut self, now: u64, own: OwnInputs<'_>) {
+        self.clock = self.clock.max(now);
         self.propose_or_respond(now, own);
         self.drive_sealed(now, own);
         self.drain_future(now, own);
@@ -157,7 +180,11 @@ impl<R: StateMachine + Clone> Pipeline<R> {
     }
     fn pump_audit(&mut self) {
         while let Some(m) = self.auditor.poll_msg() {
-            self.outbox.push_back(m);
+            self.outbox.push_back(Stamped {
+                out: m,
+                tick: 0,
+                seq: 0,
+            });
         }
         while let Some(e) = self.auditor.poll_event() {
             if let AuditEvent::ProvenEquivocation {
@@ -176,6 +203,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
     }
     /// A message from `from`, whose identity the transport has authenticated.
     pub fn on_message(&mut self, from: ParticipantId, msg: PipeMsg, now: u64, own: OwnInputs<'_>) {
+        self.clock = self.clock.max(now);
         match msg {
             PipeMsg::Batch(b) => self.accept_batch(b, now, own),
             PipeMsg::Checkpoint(c) => self.on_checkpoint(c, now),

@@ -222,13 +222,10 @@ fn cell_and_messages_round_trip_and_reject_corruption() {
     let bytes = c.cells[0].encode();
     assert_eq!(Cell::decode(&bytes), Some(c.cells[0].clone()));
     assert_eq!(Cell::decode(&bytes[..bytes.len() - 1]), None);
-    let QuorumMsg::Held { claim, receipt } = c.acceptors[0].held(&c.cells[0], 2).unwrap() else {
-        panic!()
-    };
-    let msg = QuorumMsg::Held { claim, receipt };
+    let msg = c.acceptors[0].held(&c.cells[0], 2).remove(0);
     assert_eq!(QuorumMsg::decode(&msg.encode()), Ok(msg.clone()));
     let mut bad = msg.encode();
     bad.truncate(bad.len() - 3);
     assert!(QuorumMsg::decode(&bad).is_err());
-    assert!(c.acceptors[0].held(&c.cells[0], 3).is_none());
+    assert!(c.acceptors[0].held(&c.cells[0], 3).is_empty());
 }
