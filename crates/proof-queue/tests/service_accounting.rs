@@ -179,7 +179,7 @@ fn an_idle_pool_sleeps_instead_of_spinning() {
     ));
     let pool = WorkerPool::start(Arc::clone(&svc), 1);
     std::thread::sleep(Duration::from_millis(400));
-    pool.stop();
+    drop(pool);
     let n = reads.load(Ordering::Relaxed);
     assert!(n < 200, "an idle worker read the clock {n} times in 400 ms");
 }
@@ -205,23 +205,13 @@ fn a_busy_pool_does_not_sleep_between_batches() {
         "200 one-job batches took {:?}: the worker slept between them",
         started.elapsed()
     );
-    pool.stop();
+    drop(pool);
 }
 
 fn assert_no_work_after(svc: &Arc<Service>, what: &str) {
     svc.submit(spec(9, 9)).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(svc.stats().live, 1, "{what}: a stopped pool kept working");
-}
-
-#[test]
-fn stopping_a_pool_stops_its_threads() {
-    let svc = Arc::new(service_with(
-        Box::new(SystemClock),
-        ServiceConfig::default(),
-    ));
-    WorkerPool::start(Arc::clone(&svc), 2).stop();
-    assert_no_work_after(&svc, "stop");
 }
 
 #[test]

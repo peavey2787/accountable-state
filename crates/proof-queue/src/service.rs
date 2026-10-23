@@ -237,22 +237,14 @@ mod pool {
                 .collect();
             Self { stop, threads }
         }
-
-        pub fn stop(mut self) {
-            self.shutdown();
-        }
-
-        fn shutdown(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
-            for t in self.threads.drain(..) {
-                let _ = t.join();
-            }
-        }
     }
 
     impl Drop for WorkerPool {
         fn drop(&mut self) {
-            self.shutdown();
+            self.stop.store(true, Ordering::SeqCst);
+            for t in self.threads.drain(..) {
+                let _ = t.join();
+            }
         }
     }
 

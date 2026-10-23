@@ -350,3 +350,40 @@ fn compaction_waits_for_the_minimum_and_then_for_the_journal_to_double() {
     submit(&mut q, 7);
     assert_eq!(q.metrics().compactions, 2, "exactly doubled");
 }
+
+#[test]
+fn notifications_of_one_housekeeping_pass_are_numbered_one_after_another() {
+    let mut q = queue(&Config::default());
+    for n in 0..3 {
+        let mut s = spec(1, n);
+        s.deadline = Some(5);
+        q.submit(s, 0).unwrap();
+    }
+    let before = q.last_event();
+    q.maintain(10).unwrap();
+    let seqs: Vec<u64> = q
+        .events_after(before, 10)
+        .events
+        .iter()
+        .map(|e| e.seq)
+        .collect();
+    assert_eq!(seqs, vec![before + 1, before + 2, before + 3]);
+    assert_eq!(q.last_event(), before + 3);
+}
+
+#[test]
+fn a_failed_compaction_is_counted_once_per_failure() {
+    let mem = MemJournal::new();
+    let cfg = Config {
+        compact_min_bytes: 1,
+        ..Config::default()
+    };
+    let mut q = Queue::open(mem.open(), cfg, 0).unwrap();
+    q.submit(spec(1, 0), 0).unwrap();
+    mem.set_failing(true);
+    for failures in 1..=2 {
+        assert!(q.maintain(0).is_err());
+        assert_eq!(q.metrics().storage_errors, failures);
+    }
+    assert_eq!(q.metrics().compactions, 0);
+}

@@ -92,7 +92,7 @@ fn workers_verify_submitted_evidence_and_honest_and_forged_are_told_apart() {
         ids.iter()
             .all(|i| svc.job(i).is_some_and(|j| j.state.is_terminal()))
     });
-    pool.stop();
+    drop(pool);
     for (n, id) in ids.iter().enumerate() {
         let want = if n % 10 == 0 {
             JobState::Failed
@@ -192,7 +192,7 @@ fn a_process_that_dies_mid_verification_loses_nothing() {
         ids.iter()
             .all(|i| svc.job(i).is_some_and(|j| j.state == JobState::Verified))
     });
-    pool.stop();
+    drop(pool);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -365,7 +365,7 @@ fn gameplay_frames_are_not_delayed_by_a_busy_verification_backlog() {
     let pool = WorkerPool::start(Arc::clone(&svc), 4);
     let busy = p99(frame_times(&svc, 1000));
     let during = verified(&svc) - before;
-    pool.stop();
+    drop(pool);
     assert!(
         during > 0,
         "the workers must have verified jobs while frames ran"
