@@ -892,6 +892,7 @@ impl Auditor {
                     .push_back(Outgoing::to(from, PipeMsg::Anchor(held)));
             }
             PipeMsg::Anchor(a) => self.on_anchor(from, a),
+            PipeMsg::Quorum(q) => self.on_quorum(from, q),
             _ => {}
         }
     }

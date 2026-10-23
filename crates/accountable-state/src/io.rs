@@ -1,6 +1,7 @@
 use gv_core::ParticipantId;
 use gv_edge::audit::{Authenticator, Response};
 use gv_edge::live::{Dest, PipeEvent};
+use gv_edge::quorum::QuorumMsg;
 
 /// Who sent bytes to [`crate::AccountableState::receive`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,13 +27,18 @@ pub enum Outgoing {
 #[derive(Clone, Debug)]
 pub enum WitnessOut {
     /// A signed log head (mine or the opponent's) for witnesses to retain.
-    Auth(Authenticator),
+    Auth(Box<Authenticator>),
     /// My answer to a witness challenge.
-    Response(Response),
+    Response(Box<Response>),
     /// Verified accountability evidence (`audit::Evidence` bytes).
     Evidence(Vec<u8>),
     /// A verified `GV-EVIDENCE-PACKAGE/V1` fraud witness.
     Package(Vec<u8>),
+    /// Head-register traffic: to one witness, or to all of them (`None`).
+    Quorum {
+        to: Option<ParticipantId>,
+        msg: Box<QuorumMsg>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +58,8 @@ pub enum OpenError {
     Recovery(String),
     /// Durable storage could not be opened. Accountable operation never falls back to memory.
     Storage { file: String, error: String },
+    /// The witness configuration cannot support the requested mode.
+    Witnesses(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

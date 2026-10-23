@@ -36,7 +36,7 @@ mod persist;
 mod verifier;
 pub mod view;
 
-pub use config::{Config, DurableStorage};
+pub use config::{Config, DurableStorage, WitnessMode};
 pub use evidence::{EvidencePackage, ExportQuery};
 pub use io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, WitnessOut};
 pub use node::{AccountableState, StateView};

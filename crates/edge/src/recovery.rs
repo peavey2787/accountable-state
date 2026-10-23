@@ -224,27 +224,7 @@ impl CertifiedMatch {
                 self.apply_dispute(&mut replica, &self.disputes[next_dispute].proof)?;
                 next_dispute += 1;
             }
-            let evidence = &cert.evidence;
-            let claim = &evidence.accused.claim;
-            if evidence.session != replica.session
-                || claim.epoch_start != replica.next_tick()
-                || claim.previous_checkpoint != replica.previous_checkpoint()
-                || cert.verify_with(
-                    &replica.rules,
-                    replica.previous_checkpoint(),
-                    state_commitment(replica.state()),
-                    self.live,
-                ) != EvidenceVerdict::ValidClaim
-            {
-                return Err(EdgeError::BadCheckpoint);
-            }
-            for batch in evidence.inputs.iter().flatten() {
-                replica.admit(batch.clone())?;
-            }
-            if replica.candidate()?.checkpoint != *claim {
-                return Err(EdgeError::BadCheckpoint);
-            }
-            replica.finalize(cert.signatures())?;
+            replica.apply_certified(cert)?;
         }
         for d in &self.disputes[next_dispute..] {
             self.apply_dispute(&mut replica, &d.proof)?;

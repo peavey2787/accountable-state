@@ -12,11 +12,14 @@ use crate::audit::{
     Authenticator, Challenge, ChallengeKind, Evidence, Ledger, Outcome, Response, Segment,
 };
 use crate::export::{verify_package, Package, TrustAnchor, Verified};
+use crate::quorum::QuorumMsg;
 use crate::StateMachine;
 use gv_core::{Digest, MatchId, ParticipantId, Session};
 use gv_sig::{Signature, SigningKey, SIG_LEN};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+mod quorum;
 
 const MAGIC: &[u8] = b"GV-WITNESS/V1\0";
 const HELLO_LABEL: &str = "gv/witness/hello/v1";
@@ -73,6 +76,8 @@ pub enum Msg {
     },
     Challenge(Challenge),
     Response(Response),
+    /// Head-register request or answer (see [`crate::quorum`]).
+    Quorum(QuorumMsg),
 }
 
 struct W(Vec<u8>);
@@ -196,6 +201,10 @@ impl Msg {
                 w.0.push(9);
                 w.blob(&r.encode());
             }
+            Msg::Quorum(q) => {
+                w.0.push(11);
+                w.blob(&q.encode());
+            }
         }
         w.0
     }
@@ -250,6 +259,7 @@ impl Msg {
                 data: r.blob()?.to_vec(),
             },
             9 => Msg::Response(Response::decode(r.blob()?).ok()?),
+            11 => Msg::Quorum(QuorumMsg::decode(r.blob()?).ok()?),
             _ => return None,
         };
         r.0.is_empty().then_some(m)
@@ -328,6 +338,12 @@ pub enum Event {
         link: LinkId,
         challenge: Challenge,
     },
+    /// A witness's register answer for the local player (host routes it to the auditor).
+    Quorum {
+        link: LinkId,
+        from: ParticipantId,
+        msg: QuorumMsg,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -363,6 +379,7 @@ pub struct WitnessNode<R: StateMachine + Clone> {
     events: VecDeque<Event>,
     stats: Stats,
     nonce: u64,
+    register: Option<Box<dyn quorum::Responder>>,
 }
 
 impl<R: StateMachine + Clone> WitnessNode<R> {
@@ -396,6 +413,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
             events: VecDeque::new(),
             stats: Stats::default(),
             nonce: 0,
+            register: None,
         }
     }
     pub fn stats(&self) -> Stats {
@@ -871,6 +889,7 @@ impl<R: StateMachine + Clone> WitnessNode<R> {
                 }
             }
             Msg::Response(r) => self.on_response(link, &r),
+            Msg::Quorum(q) => self.on_quorum(link, q),
         }
     }
 

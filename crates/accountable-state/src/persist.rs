@@ -13,6 +13,7 @@ use gv_edge::audit::{Evidence, Status};
 use gv_edge::export::{AuditExport, ExportEvent, MAX_AUDIT_ITEMS};
 use gv_edge::feed::{FeedStore, SignedEvent};
 use gv_edge::live::{AuditEvent, PipeEvent, Pipeline, Violation, ViolationKind};
+use gv_edge::quorum::WitnessSet;
 use gv_edge::{ArchiveBuilder, CertifiedEpoch, CertifiedMatch, CheckpointEvidence, FraudBundle};
 use gv_replay::StateMachine;
 use gv_sig::SigningKey;
@@ -84,12 +85,13 @@ impl Persistence {
         receipts: &CertifiedMatch,
         key: SigningKey,
         start_tick: u64,
+        quorum: Option<WitnessSet>,
         sink: &mut Sink<'_>,
     ) -> Result<Self, OpenError> {
         let (ledger, recovered) = RecordFile::open(&storage.file(".evidence-ledger"))
             .map_err(|e| storage_error(storage, ".evidence-ledger", e))?;
         let durable = Durable::new(storage.base());
-        recover_auditor(storage, &durable, pipe, &recovered, sink)?;
+        recover_auditor(storage, &durable, pipe, &recovered, quorum, sink)?;
         if let Some(cs) = durable.load_challenges().ok() {
             pipe.auditor_mut().resume_challenges(&cs, start_tick);
         }
@@ -415,6 +417,7 @@ fn recover_auditor<M: StateMachine + Clone>(
     durable: &Durable,
     pipe: &mut Pipeline<M>,
     recovered: &[Vec<u8>],
+    quorum: Option<WitnessSet>,
     sink: &mut Sink<'_>,
 ) -> Result<(), OpenError> {
     let me = pipe.auditor().log().owner();
@@ -432,6 +435,11 @@ fn recover_auditor<M: StateMachine + Clone>(
     anchors.extend(loaded.heads);
     let report = pipe.auditor_mut().restore(log, &anchors, recovered);
     pipe.auditor_mut().attach_store(Box::new(store), len, top);
+    if let Some(set) = quorum {
+        if !pipe.auditor_mut().enable_witness_quorum(set) {
+            return Err(OpenError::Witnesses("unusable witness set".into()));
+        }
+    }
     pipe.auditor_mut().require_anchor_check();
     if !report.recovery.may_sign() {
         sink.fault(format!("audit recovery not trusted: {:?}", report.recovery));

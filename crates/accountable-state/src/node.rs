@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, WitnessMode};
 use crate::evidence::{Context, EvidencePackage, ExportQuery};
 use crate::io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, WitnessOut};
 use crate::own::OwnInputs;
@@ -8,6 +8,7 @@ use gv_core::{Digest, ParticipantId, Session};
 use gv_edge::export::{export_audit, export_match, DisclosurePolicy, ExportError};
 use gv_edge::feed::SignedEvent;
 use gv_edge::live::{PipeEvent, PipeMsg, Pipeline, SealError};
+use gv_edge::quorum::WitnessSet;
 use gv_edge::CertifiedMatch;
 use gv_replay::{ActionOrdering, StateMachine};
 use std::collections::VecDeque;
@@ -25,6 +26,9 @@ pub struct StateView<'a> {
     pub next_submit: u64,
     /// After a (re)start nothing is signed until the anchor check completes.
     pub anchor_check_pending: bool,
+    /// Witness-quorum recovery has not yet read a quorum: nothing is signed, and nothing
+    /// resumes on a timeout.
+    pub recovery_blocked: bool,
 }
 
 /// One participant of an accountable state machine shared by a roster. Sans-IO: the application feeds it
@@ -72,6 +76,12 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         for w in &config.witnesses {
             pipe.auditor_mut().admit_witness(*w);
         }
+        let quorum = match config.witness_mode {
+            WitnessMode::PeersOnly => None,
+            WitnessMode::Quorum => Some(WitnessSet::new(&config.witnesses).ok_or_else(|| {
+                OpenError::Witnesses("quorum mode needs 1..=31 distinct witnesses".into())
+            })?),
+        };
         let mut outgoing = VecDeque::new();
         let mut events = VecDeque::new();
         let witnesses = !config.witnesses.is_empty();
@@ -86,6 +96,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             &receipts,
             config.key,
             start,
+            quorum,
             &mut sink,
         )?;
         Ok(Self {
@@ -130,14 +141,14 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         match (from, msg) {
             (Peer::Member(id), msg) => {
                 if let PipeMsg::Auth(a) = &msg {
-                    self.queue_for_witness(WitnessOut::Auth(a.clone()));
+                    self.queue_for_witness(WitnessOut::Auth(Box::new(a.clone())));
                 }
                 self.drive(|pipe, now, own| pipe.on_message(id, msg, now, own));
             }
             (Peer::Witness(_), PipeMsg::Anchor(Some(a))) => {
                 self.pipe.auditor_mut().on_witness_anchor(&a);
             }
-            (Peer::Witness(id), msg @ PipeMsg::Challenge(_)) => {
+            (Peer::Witness(id), msg @ (PipeMsg::Challenge(_) | PipeMsg::Quorum(_))) => {
                 self.drive(|pipe, now, own| pipe.on_message(id, msg, now, own));
             }
             (Peer::Witness(_), _) => return Err(ReceiveError::NotAllowedFromWitness),
@@ -164,6 +175,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             checkpoint: self.checkpoint,
             next_submit: self.now,
             anchor_check_pending: self.pipe.auditor().anchor_check_pending(),
+            recovery_blocked: self.pipe.auditor().recovery_blocked(),
         }
     }
 
@@ -273,9 +285,17 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         if let Some(o) = self.outgoing.pop_front() {
             return Some(Output::Send(o));
         }
+        if let Some((to, msg)) = self.pipe.auditor_mut().poll_quorum() {
+            return Some(Output::Send(Outgoing::Witness(WitnessOut::Quorum {
+                to,
+                msg: Box::new(msg),
+            })));
+        }
         if let Some(r) = self.pipe.auditor_mut().poll_witness_response() {
             if self.witnesses {
-                return Some(Output::Send(Outgoing::Witness(WitnessOut::Response(r))));
+                return Some(Output::Send(Outgoing::Witness(WitnessOut::Response(
+                    Box::new(r),
+                ))));
             }
         }
         if let Some(out) = self.next_message() {
@@ -287,7 +307,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
     fn next_message(&mut self) -> Option<Output> {
         let out = self.pipe.poll_outbox()?;
         if let PipeMsg::Auth(a) = &out.msg {
-            self.queue_for_witness(WitnessOut::Auth(a.clone()));
+            self.queue_for_witness(WitnessOut::Auth(Box::new(a.clone())));
         }
         match out.msg.encode() {
             Ok(bytes) => Some(Output::Send(Outgoing::Member { to: out.to, bytes })),

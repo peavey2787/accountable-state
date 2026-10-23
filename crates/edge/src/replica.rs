@@ -1,6 +1,7 @@
 use super::checkpoint::{
     inputs_root, state_commitment, Checkpoint, CheckpointError, SignedCheckpoint, MAX_EPOCH_TICKS,
 };
+use super::{CertifiedEpoch, EvidenceVerdict};
 use gv_codec::SignedEventBatch;
 use gv_core::{Digest, MatchId, Session};
 use gv_replay::{replay_epoch, InputViolation, ReplayError, StateMachine, MAX_STATE_BYTES};
@@ -255,6 +256,33 @@ impl<R: StateMachine> MatchReplica<R> {
         self.accepted.push(epoch);
         self.proposed = vec![None; self.session.roster.len()];
         Ok(digest)
+    }
+    /// Advance over one certified epoch received from anyone: the epoch must continue exactly
+    /// this chain head, satisfy the session's certification policy, and replay of its signed
+    /// inputs must reproduce the certified claim. Nothing is taken on trust.
+    pub fn apply_certified(&mut self, cert: &CertifiedEpoch) -> Result<(), EdgeError> {
+        let evidence = &cert.evidence;
+        let claim = &evidence.accused.claim;
+        if evidence.session != self.session
+            || claim.epoch_start != self.next_tick
+            || claim.previous_checkpoint != self.previous_checkpoint
+            || cert.verify_with(
+                &self.rules,
+                self.previous_checkpoint,
+                state_commitment(&self.state),
+                self.sanitize,
+            ) != EvidenceVerdict::ValidClaim
+        {
+            return Err(EdgeError::BadCheckpoint);
+        }
+        for batch in evidence.inputs.iter().flatten() {
+            self.admit(batch.clone())?;
+        }
+        if self.candidate()?.checkpoint != *claim {
+            self.discard_pending();
+            return Err(EdgeError::BadCheckpoint);
+        }
+        self.finalize(cert.signatures()).map(drop)
     }
     /// Drop all but the newest `keep` accepted epochs. A long live match
     /// certifies thousands of epochs; the durable record is the receipt archive,

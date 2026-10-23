@@ -37,6 +37,7 @@ fn config(key: SigningKey, storage: DurableStorage) -> Config {
         session: session(),
         pipeline: PipelineConfig::new(controls(0).to_vec()),
         witnesses: Vec::new(),
+        witness_mode: accountable_state::WitnessMode::PeersOnly,
         disclosure: DisclosurePolicy::PUBLIC,
         resume: None,
         storage,

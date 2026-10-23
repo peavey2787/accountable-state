@@ -10,6 +10,7 @@
 pub mod acceptor;
 pub mod gather;
 pub mod registrar;
+pub mod service;
 pub mod set;
 #[cfg(test)]
 mod tests;
@@ -18,5 +19,6 @@ pub mod wire;
 pub use acceptor::{Acceptor, Cell, Refusal};
 pub use gather::Gatherer;
 pub use registrar::{Event, Phase, Registrar};
+pub use service::{CellStore, FileCellStore, RegisterWitness};
 pub use set::{Ballot, WitnessSet, MAX_WITNESSES};
 pub use wire::{Certificate, Claim, Nack, Promise, QuorumError, QuorumMsg, Receipt, Recover};

@@ -29,6 +29,18 @@ impl DurableStorage {
     }
 }
 
+/// How a restarted node learns the newest head it ever committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitnessMode {
+    /// Heads are committed to a quorum of the pinned witnesses and recovery reads a quorum
+    /// (never a timeout); signed output leaves only once a quorum holds it, and equivocation
+    /// convicts only on witness-certified heads. Needs at least one witness.
+    Quorum,
+    /// Legacy: every opponent (and any witnesses) must answer an anchor request; a lost or
+    /// rolled-back head is only detected if some peer still holds a newer one. Explicit opt-in.
+    PeersOnly,
+}
+
 /// Everything [`crate::AccountableState::open`] needs. There is deliberately no `Default`.
 pub struct Config {
     pub key: SigningKey,
@@ -41,6 +53,7 @@ pub struct Config {
     /// Pinned witnesses. With witnesses, recovery after a restart also waits for their
     /// retained heads (see the anchor trust boundary in docs/39).
     pub witnesses: Vec<ParticipantId>,
+    pub witness_mode: WitnessMode,
     /// What evidence may disclose; stated by the application, never assumed.
     pub disclosure: DisclosurePolicy,
     /// Certified history to resume from (`GV-CERTIFIED-MATCH/V1`, live engine).

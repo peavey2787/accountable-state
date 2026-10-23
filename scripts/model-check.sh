@@ -28,9 +28,10 @@ PY
     chmod +x "$JAVA"
   fi
 fi
-run() { # cfg
-  local out="$TOOLS/$1.out"
-  ( cd spec && nice -n 19 timeout "${TLC_TIMEOUT:-600}" "$JAVA" -Xmx3g -XX:+UseSerialGC -cp "$JAR" tlc2.TLC -workers "${TLC_WORKERS:-2}" -metadir "$TOOLS/states-$1" -config "$1.cfg" Accountability.tla ) > "$out" 2>&1 || true
+run() { # cfg (head_* configs check HeadRegister.tla, the rest Accountability.tla)
+  local out="$TOOLS/$1.out" mod=Accountability.tla
+  case "$1" in head_*) mod=HeadRegister.tla ;; esac
+  ( cd spec && nice -n 19 timeout "${TLC_TIMEOUT:-600}" "$JAVA" -Xmx3g -XX:+UseSerialGC -cp "$JAR" tlc2.TLC -workers "${TLC_WORKERS:-2}" -metadir "$TOOLS/states-$1" -config "$1.cfg" "$mod" ) > "$out" 2>&1 || true
   echo "== $1: $(grep -E 'Model checking completed|Error:|Invariant .* is violated|Temporal properties were violated|Timeout|exceeded' "$out" | head -2 | tr '\n' ' ')"
   grep -E "states generated|distinct states found" "$out" | tail -1
 }
@@ -40,10 +41,14 @@ if [ "${1:-}" = --negative ]; then
     grep -qE "is violated|Error: " "$TOOLS/$c.out" && grep -q "Invariant NoSelfEquivocation is violated" "$TOOLS/$c.out" \
       || { echo "FAIL: $c was expected to violate NoSelfEquivocation" >&2; exit 1; }
   done
+  for c in head_neg_smallread head_neg_nofence head_neg_toomanybyz; do
+    run "$c"
+    grep -q "Invariant NoSelfEquivocation is violated" "$TOOLS/$c.out"       || { echo "FAIL: $c was expected to violate NoSelfEquivocation" >&2; exit 1; }
+  done
   echo "negative models fail as expected (the safeguards are necessary in the model)"
   exit 0
 fi
-for c in ${MODEL_CONFIGS:-n2 n3 n2_live}; do
+for c in ${MODEL_CONFIGS:-n2 n3 n2_live head_register}; do
   run "$c"
   grep -q "Model checking completed. No error has been found" "$TOOLS/$c.out" \
     || { echo "FAIL: $c" >&2; tail -n 30 "$TOOLS/$c.out" >&2; exit 1; }
