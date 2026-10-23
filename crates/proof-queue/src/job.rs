@@ -156,7 +156,8 @@ pub struct Job {
 }
 
 impl Job {
-    pub(crate) fn new(spec: JobSpec, now: u64, seq: u64) -> Self {
+    /// A pending job as accepted at `now`; `seq` orders jobs within a match.
+    pub fn new(spec: JobSpec, now: u64, seq: u64) -> Self {
         Self {
             id: spec.id(),
             spec,
