@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 gv-codec = { path = "../crates/codec" }
 gv-edge = { path = "../crates/edge" }
+gv-proof-queue = { path = "../crates/proof-queue" }
 
 [workspace]
 
@@ -35,5 +36,11 @@ doc = false
 [[bin]]
 name = "archive"
 path = "fuzz_targets/archive.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "proof_queue"
+path = "fuzz_targets/proof_queue.rs"
 test = false
 doc = false
