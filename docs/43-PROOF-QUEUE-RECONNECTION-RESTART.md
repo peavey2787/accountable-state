@@ -10,6 +10,30 @@ capacity. A timeout is `Expired`, never certification. Backends: `FileJournal` (
 makes the queue refuse work). The browser binding is `adapters/wasm` (`ProofQueue`), validated
 with `wasm-pack test --node` in both `run-all` scripts.
 
+## SDK offload (`accountable_state::offload::ProofOffload`)
+The node queues the equivocation evidence it produces (`WitnessOut::Evidence`, `Family::EQUIVOCATION`,
+`High` priority) instead of verifying it inline; gameplay never waits on proof work. `findings()`
+returns the convictions the queue has proven for this match and flags a gap if the event feed was
+trimmed; `acknowledge` forgets a finding once it has been acted on. Duplicates and non-evidence
+output are not queued.
+
+## Native engine adapter (`adapters/c`, crate `gv-capi`)
+A C ABI (`include/gv_proofs.h`) over `HostQueue`: opaque `GvQueue` handle, library-allocated
+`GvBuffer` released with `gv_buffer_free`, status codes (`Ok`, `NullArgument`, `Invalid`,
+`NotFound`, `Panicked`), per-thread `gv_last_error`. Panics are contained at the boundary and null
+pointers are refused. The host supplies the clock and stores the blobs from `gv_queue_take_writes`.
+`scripts/capi-dotnet-smoke.{cmd,sh}` builds the library and drives it through .NET P/Invoke, the
+same mechanism Unity (Mono/IL2CPP) uses.
+
+| Engine path | Status |
+| --- | --- |
+| WASM / browser | Verified (`wasm-pack test --node`) |
+| C ABI from Rust tests | Verified (`adapters/c/tests/capi.rs`) |
+| Unity-style .NET P/Invoke | Verified with the .NET SDK; prints an explicit "GATE NOT RUN" if `dotnet` is absent |
+| Unity editor / IL2CPP player build | NOT RUN: editor not installed |
+| Unreal (C++ module including `gv_proofs.h`) | NOT RUN: Unreal and a C/C++ compiler not installed |
+| Godot (GDExtension) | NOT RUN: Godot and a C/C++ compiler not installed |
+
 ## Individual-peer reconnection
 `PipeMsg` resume (tag 15) with incarnation fencing. Peer events: `Down`, `Resumed`,
 `Superseded`, `CaughtUp`, `GraceExpired`. A single peer dropping does not abort the session.
