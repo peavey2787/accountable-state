@@ -11,11 +11,12 @@ mod answers;
 mod certify;
 mod collect;
 mod config;
+mod resume;
 mod sealed;
 
 pub use config::{
-    OwnInputs, PipeEvent, PipelineConfig, SealError, SealPolicy, Suspicion, SuspicionKind,
-    Violation, ViolationKind,
+    OwnInputs, PeerEvent, PipeEvent, PipelineConfig, SealError, SealPolicy, Suspicion,
+    SuspicionKind, Violation, ViolationKind,
 };
 
 use super::auditor::{AuditEvent, Auditor};
@@ -56,6 +57,7 @@ pub struct Pipeline<R: StateMachine + Clone> {
     auditor: Auditor,
     epoch_done: bool,
     last_peer_checkpoint: Option<SignedCheckpoint>,
+    resume: resume::ResumeState,
 }
 
 impl<R: StateMachine + Clone> Pipeline<R> {
@@ -100,7 +102,13 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             auditor,
             epoch_done: false,
             last_peer_checkpoint: None,
+            resume: resume::ResumeState::new(0),
         })
+    }
+    /// The durable per-storage open counter: a larger one supersedes an older process of the
+    /// same identity. Set once, right after construction.
+    pub fn set_incarnation(&mut self, incarnation: u64) {
+        self.resume.incarnation = incarnation;
     }
     pub fn verified_tick(&self) -> u64 {
         self.replica.next_tick()
@@ -172,6 +180,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         self.drive_sealed(now, own);
         self.drain_future(now, own);
         self.maybe_close(now);
+        self.expire_grace(now);
         if std::mem::take(&mut self.epoch_done) {
             self.auditor.on_epoch(now);
         }
@@ -209,6 +218,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             PipeMsg::Checkpoint(c) => self.on_checkpoint(c, now),
             PipeMsg::Close(c) => self.on_close(from, c, now),
             PipeMsg::Seal(s) => self.on_seal(from, s, now),
+            PipeMsg::Resume(r) => self.on_resume(from, r),
             sealed @ (PipeMsg::Commit(_) | PipeMsg::Lock { .. } | PipeMsg::Reveal(_)) => {
                 self.on_sealed_msg(from, sealed);
             }
@@ -217,7 +227,8 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             | PipeMsg::Response(_)
             | PipeMsg::Evidence(_)
             | PipeMsg::AnchorReq
-            | PipeMsg::Anchor(_)) => {
+            | PipeMsg::Anchor(_)
+            | PipeMsg::Quorum(_)) => {
                 let src = ReplicaAnswers {
                     replica: &self.replica,
                     rules: &self.rules,

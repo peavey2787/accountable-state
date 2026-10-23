@@ -43,6 +43,9 @@ pub struct PipelineConfig {
     /// After this many ticks without every submitter's batch, the rotating coordinator may close
     /// the epoch with the batches it holds. `None` waits for every submitter indefinitely.
     pub close_after_ticks: Option<u64>,
+    /// How long a dropped peer may stay away before the application is told its grace period
+    /// ran out. Reporting it is not a verdict.
+    pub peer_grace_ticks: u64,
     pub seal: Option<SealPolicy>,
 }
 impl PipelineConfig {
@@ -52,6 +55,7 @@ impl PipelineConfig {
             max_window: 3600,
             idle_input,
             close_after_ticks: None,
+            peer_grace_ticks: 1800,
             seal: None,
         }
     }
@@ -129,8 +133,35 @@ pub enum PipeEvent {
     },
     /// Accountability progress (challenge state changes, rejected accusations).
     Audit(AuditEvent),
+    /// Reconnection progress of a single peer.
+    Peer(PeerEvent),
     /// A protocol problem that is not proof of cheating (transport, ordering).
     Fault(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerEvent {
+    Down {
+        peer: ParticipantId,
+    },
+    /// The peer proved its key and incarnation on the new link.
+    Resumed {
+        peer: ParticipantId,
+        incarnation: u64,
+    },
+    /// The peer's proof lost against a newer or winning incarnation of the same identity.
+    Superseded {
+        peer: ParticipantId,
+    },
+    /// This node caught up to the certified chain at `tick`.
+    CaughtUp {
+        tick: u64,
+    },
+    /// The peer stayed away for the whole grace period (never a proof of misbehavior).
+    GraceExpired {
+        peer: ParticipantId,
+        since: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

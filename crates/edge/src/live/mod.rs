@@ -4,12 +4,13 @@ pub mod auditor;
 pub(crate) mod gate;
 pub mod msg;
 pub mod pipeline;
+pub mod resume;
 pub mod stream;
 pub mod timeline;
 pub use auditor::{Answers, AuditEvent, AuditStats, Auditor, NoAnswers};
 pub use msg::{Close, Dest, Opening, Outgoing, PipeError, PipeMsg, SignedSeal};
 pub use pipeline::{
-    OwnInputs, PipeEvent, Pipeline, PipelineConfig, SealError, SealPolicy, Suspicion,
+    OwnInputs, PeerEvent, PipeEvent, Pipeline, PipelineConfig, SealError, SealPolicy, Suspicion,
     SuspicionKind, Violation, ViolationKind,
 };
 pub use stream::{StreamError, StreamFrame, StreamSender};
@@ -25,6 +26,8 @@ mod pipeline_tests;
 mod quorum_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

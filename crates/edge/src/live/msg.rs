@@ -1,5 +1,7 @@
 //! Reliable pipeline messages exchanged between the participants of one session.
 use crate::audit::{Authenticator, Challenge, Evidence, Response};
+use crate::live::resume::ResumeMsg;
+use crate::quorum::QuorumMsg;
 use crate::{SignedBatchCommitment, SignedCheckpoint, SignedEpochLock};
 use gv_codec::SignedEventBatch;
 use gv_core::{MatchId, ParticipantId, MAX_PARTICIPANTS};
@@ -210,6 +212,10 @@ pub enum PipeMsg {
     /// head is signed by the requester, so a responder can withhold or replay an old one but
     /// never forge a newer one.
     Anchor(Option<Authenticator>),
+    /// Head-register traffic between a player and a pinned witness (never between players).
+    Quorum(QuorumMsg),
+    /// Reconnection: key-possession proof, incarnation fencing and certified-epoch catch-up.
+    Resume(ResumeMsg),
 }
 
 impl PipeMsg {
@@ -236,6 +242,8 @@ impl PipeMsg {
             Self::Evidence(e) => (11, e.encode().map_err(malformed)?),
             Self::AnchorReq => (12, Vec::new()),
             Self::Anchor(a) => (13, a.as_ref().map_or_else(Vec::new, Authenticator::encode)),
+            Self::Quorum(q) => (14, q.encode()),
+            Self::Resume(r) => (15, r.encode().map_err(malformed)?),
         };
         let mut out = Vec::with_capacity(body.len() + 1);
         out.push(tag);
@@ -273,6 +281,8 @@ impl PipeMsg {
             12 if body.is_empty() => Self::AnchorReq,
             13 if body.is_empty() => Self::Anchor(None),
             13 => Self::Anchor(Some(Authenticator::decode(body).map_err(malformed)?)),
+            14 => Self::Quorum(QuorumMsg::decode(body).map_err(malformed)?),
+            15 => Self::Resume(ResumeMsg::decode(body).map_err(malformed)?),
             _ => return Err(PipeError::Malformed),
         })
     }
