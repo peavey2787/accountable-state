@@ -48,10 +48,8 @@ Signing happens on the pipeline task, never on the 60 Hz sim path.
 
 ## License note
 
-`hydra-msg` / `hydra-crypto` are GPL-2.0-or-later. The workspace is MIT, but `gv-sig` is declared
-`GPL-2.0-or-later` and every binary that links it (including `gv-edge` and `accountable-state`)
-is therefore distributed under GPL-2.0-or-later terms. Source-only use of the MIT crates that
-do not link `gv-sig` is unaffected. The `p2p-net` and Hydra git dependencies are pinned by
+`hydra-msg` / `hydra-crypto` are GPL-2.0-or-later and the whole workspace is declared
+`GPL-2.0-or-later`, so every crate and binary is distributed under the same terms. The `p2p-net` and Hydra git dependencies are pinned by
 `Cargo.lock`; check their licenses before redistributing binaries.
 
 ## Hide commitment blinding

@@ -83,9 +83,8 @@ publication, not guilt ([docs/38](docs/38-EVIDENCE-EXPORT.md)).
 
 ## Licensing
 
-SDK code is MIT. Binaries linking `gv-sig` (Hydra's ML-DSA, GPL-2.0-or-later) are
-distributed under GPL-2.0-or-later ([docs/33](docs/33-HYDRA-MLDSA-INTEGRATION.md)). The
-`p2p-net` source declares BUSL-1.1; a planned change to GPL-2.0 is not assumed.
+All code in this repository is GPL-2.0-or-later (see `LICENSE`), matching Hydra's ML-DSA
+(`gv-sig` links it; [docs/33](docs/33-HYDRA-MLDSA-INTEGRATION.md)) and the other repositories.
 
 ## Documentation
 
