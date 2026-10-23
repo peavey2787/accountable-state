@@ -170,6 +170,22 @@ fn bad_input_is_a_status_and_a_message_never_a_crash() {
     assert_eq!(status, Status::Invalid);
     assert!(last_error().contains("u16"));
 
+    for witnesses in [&[1u8; 32][..], &[1u8; 64][..]] {
+        let mut out = null_mut();
+        let status = unsafe {
+            gv_queue_open(
+                null(),
+                0,
+                witnesses.as_ptr(),
+                witnesses.len(),
+                0,
+                1 << 20,
+                &mut out,
+            )
+        };
+        assert_eq!(status, Status::Ok, "whole 32-byte ids are accepted");
+        unsafe { gv_queue_free(out) };
+    }
     for (stored, witnesses) in [(&[0u8, 1, 2][..], &[][..]), (&[][..], &[1u8; 33][..])] {
         let mut out = null_mut();
         let status = unsafe {

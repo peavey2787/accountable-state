@@ -112,3 +112,17 @@ fn a_reader_that_fell_behind_is_told_it_may_have_missed_verdicts() {
     let found = offload.findings();
     assert!(found.missed);
 }
+
+#[test]
+fn a_match_hears_only_about_its_own_violations() {
+    let (service, mut first) = offload(1000);
+    let mut second = ProofOffload::new(Arc::clone(&service), [MATCH[0].wrapping_add(1); 32]);
+    let cheat = SigningKey::from_seed([3; 32]);
+    assert!(first.offer(&evidence_output(conflicting(&cheat))).unwrap());
+    service.step().unwrap();
+    assert!(
+        second.findings().proven.is_empty(),
+        "another match's proof is not mine"
+    );
+    assert_eq!(first.findings().proven.len(), 1);
+}

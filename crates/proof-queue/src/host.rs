@@ -347,4 +347,25 @@ mod tests {
         ];
         assert_eq!(super::replay(&stored).unwrap(), vec![b, c]);
     }
+
+    #[test]
+    fn deadlines_are_measured_on_the_clock_the_page_supplies() {
+        let q = open(&[]);
+        let id = q
+            .submit(
+                Family::SIGNED_INPUTS.0,
+                &M,
+                pack(&[vec![1]]),
+                1,
+                Some(1_500),
+                1_000,
+            )
+            .unwrap();
+        q.step(2_000).unwrap();
+        assert_eq!(
+            q.state(&id),
+            Some(6),
+            "expired: the page's time is past the deadline"
+        );
+    }
 }
