@@ -182,7 +182,10 @@ fn a_false_checkpoint_becomes_an_exportable_proven_violation() {
 
 #[test]
 fn open_fails_closed_when_storage_is_unavailable() {
-    let missing = scratch("nostore").join("absent").join("node");
+    // A regular file where the storage directory should be: it can neither be created nor used.
+    let blocker = scratch("nostore").join("not-a-directory");
+    std::fs::write(&blocker, b"x").unwrap();
+    let missing = blocker.join("node");
     let err = AccountableState::open(
         GridRules,
         config(keys()[0].clone(), DurableStorage::at(missing)),

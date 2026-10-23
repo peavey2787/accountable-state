@@ -22,3 +22,4 @@ gv-p2p = { path = "../../adapters/p2p", features = ["native"], optional = true }
 
 [dev-dependencies]
 gv-edge = { path = "../edge", features = ["testkit"] }
+gv-codec = { path = "../codec" }

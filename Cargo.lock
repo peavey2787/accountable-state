@@ -6,6 +6,7 @@ version = 4
 name = "accountable-state"
 version = "0.1.0"
 dependencies = [
+ "gv-codec",
  "gv-core",
  "gv-edge",
  "gv-p2p",

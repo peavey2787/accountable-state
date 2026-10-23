@@ -5,6 +5,7 @@ use crate::io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, Wi
 use crate::own::OwnInputs;
 use crate::persist::{Persistence, Sink};
 use crate::view::{AuthorizedView, ObserverRole, ViewPolicy};
+use crate::watermark::Watermark;
 use gv_core::{Digest, ParticipantId, Session};
 use gv_edge::export::{export_audit, export_match, DisclosurePolicy, ExportError};
 use gv_edge::feed::SignedEvent;
@@ -47,6 +48,8 @@ pub struct AccountableState<M: StateMachine + Clone> {
     own: OwnInputs,
     checkpoint: Option<Digest>,
     persist: Persistence,
+    watermark: Watermark,
+    me: ParticipantId,
     outgoing: VecDeque<Outgoing>,
     events: VecDeque<PipeEvent>,
     ingress: Ingress,
@@ -69,7 +72,11 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         let replica = receipts
             .restore(config.session.clone(), machine.clone())
             .map_err(|e| OpenError::Recovery(format!("{e:?}")))?;
-        let start = replica.next_tick();
+        let watermark = Watermark::open(&config.storage)?;
+        // Never sign a tick this participant already released a batch for (it may have been
+        // signed with other inputs before a crash): resume after it.
+        let start = replica.next_tick().max(watermark.through());
+        let me = config.key.id();
         let width = config.pipeline.idle_input.len();
         #[cfg(feature = "fault-injection")]
         let epoch_ticks = config.pipeline.epoch_ticks;
@@ -115,6 +122,8 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             own: OwnInputs::new(start),
             checkpoint: None,
             persist,
+            watermark,
+            me,
             outgoing,
             events,
             ingress: Ingress::new(IngressLimits::default()),
@@ -348,6 +357,11 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         let out = self.pipe.poll_outbox()?;
         if let PipeMsg::Auth(a) = &out.msg {
             self.queue_for_witness(WitnessOut::Auth(Box::new(a.clone())));
+        }
+        if let Err(e) = self.watermark.before_release(&out.msg, &self.me) {
+            return Some(Output::Event(PipeEvent::Fault(format!(
+                "signed batch withheld, its release could not be recorded: {e}"
+            ))));
         }
         match out.msg.encode() {
             Ok(bytes) => Some(Output::Send(Outgoing::Member { to: out.to, bytes })),

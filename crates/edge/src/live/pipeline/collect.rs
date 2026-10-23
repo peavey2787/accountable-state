@@ -276,7 +276,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         }
         let end = end_of(&b);
         if let Some(existing) = self.collect.get(slot, end) {
-            if existing.digest().ok() != b.digest().ok() {
+            if existing.record != b.record {
                 let pair = [existing.clone(), b];
                 self.flag_batch_equivocation(&pair, ws);
             }

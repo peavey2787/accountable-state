@@ -37,6 +37,7 @@ mod own;
 mod persist;
 mod verifier;
 pub mod view;
+mod watermark;
 
 pub use config::{Config, DurableStorage, WitnessMode};
 pub use evidence::{EvidencePackage, ExportQuery};

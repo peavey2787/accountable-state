@@ -88,6 +88,17 @@ mod tests {
         )
     }
 
+    /// Signatures are randomized, so two honest signings of one record differ in `digest()`.
+    /// Equivocation must therefore compare the signed record, never the digest.
+    #[test]
+    fn re_signing_one_record_changes_the_digest_but_not_the_record() {
+        let (record, key) = fixture();
+        let a = SignedEventBatch::sign(record.clone(), &key).unwrap();
+        let b = SignedEventBatch::sign(record, &key).unwrap();
+        assert_eq!(a.record, b.record);
+        assert_ne!(a.digest().unwrap(), b.digest().unwrap());
+    }
+
     #[test]
     fn compact_layout_and_tamper_rejection() {
         let (record, key) = fixture();
