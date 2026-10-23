@@ -1,6 +1,11 @@
-//! WASM adapter boundary; bindings and JS byte-for-byte vectors are pending.
+//! Browser / Web Worker bindings for the proof queue. [`host::HostQueue`] holds the behavior (and
+//! is tested natively); the wasm-bindgen class below only converts types.
 #![forbid(unsafe_code)]
-use gv_core::Digest;
-pub fn bytes32(value: &[u8]) -> Option<Digest> {
-    value.try_into().ok()
-}
+
+pub mod host;
+
+#[cfg(target_arch = "wasm32")]
+mod js;
+
+#[cfg(target_arch = "wasm32")]
+pub use js::ProofQueue;

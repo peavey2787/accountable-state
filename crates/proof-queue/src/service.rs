@@ -200,6 +200,7 @@ impl Service {
     }
 
     /// Block until something may be ready (a submission, or a timer), at most `timeout`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn idle(&self, timeout: Duration) {
         let guard = self.lock();
         let _ = self.changed.wait_timeout(guard, timeout);

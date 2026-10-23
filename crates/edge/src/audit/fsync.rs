@@ -9,10 +9,11 @@ pub fn replace_file(path: &Path, data: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".pending");
     let tmp = std::path::PathBuf::from(tmp);
-    let mut f = File::create(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    drop(f);
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path)?;
     sync_parent_dir(path)
 }
@@ -23,7 +24,9 @@ pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
     open_dir(dir.unwrap_or(Path::new(".")))?.sync_all()
 }
 
-#[cfg(unix)]
+/// Everywhere else (Unix, and targets without a filesystem such as browser WASM, where this
+/// fails cleanly at run time) a plain open is enough.
+#[cfg(not(windows))]
 fn open_dir(dir: &Path) -> io::Result<File> {
     File::open(dir)
 }
