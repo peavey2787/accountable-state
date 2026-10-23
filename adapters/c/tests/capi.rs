@@ -154,9 +154,9 @@ fn evidence_goes_through_the_queue_and_the_host_stores_what_it_is_told_to() {
 fn bad_input_is_a_status_and_a_message_never_a_crash() {
     let q = open(&[]);
     assert_eq!(state(q, &[0xee; 32]).0, Status::NotFound);
-    let short = [1u8, 2];
-    let mut s = 0u8;
-    let _ = unsafe { gv_queue_job_state(q, short.as_ptr(), &mut s) };
+    // Miri showed the previous 2-byte job id here was an out-of-bounds read: the contract is a
+    // 32-byte id, a C pointer carries no length, so a short buffer is the caller's bug, not input.
+    assert_eq!(state(q, &[0; 32]).0, Status::NotFound);
     let (_, status) = submit(q, &[]);
     assert_eq!(
         status,

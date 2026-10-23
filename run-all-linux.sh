@@ -23,3 +23,10 @@ fi
 sh scripts/newest-main-compat.sh
 # 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI (explicit gate when dotnet is absent).
 sh scripts/capi-dotnet-smoke.sh
+# 4. Native host: a real C client of the C ABI (explicit gate when no C compiler), and ThreadSanitizer.
+if command -v "${CC:-cc}" >/dev/null 2>&1; then
+  sh scripts/capi-c-smoke.sh
+else
+  echo "GATE NOT RUN: no C compiler; the C ABI client did not run"
+fi
+sh scripts/tsan-linux.sh
