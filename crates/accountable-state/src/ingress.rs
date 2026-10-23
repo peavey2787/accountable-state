@@ -14,13 +14,17 @@ const RESUME_TAG: u8 = 15;
 /// More distinct peers than any roster plus its witnesses; everyone beyond shares one bucket.
 const MAX_TRACKED: usize = 256;
 
+/// What a peer may send per window. Bytes bound bandwidth and memory, whole messages bound the
+/// signature work they trigger, and malformed bytes (rejected cheaply, before any signature check)
+/// have their own, much larger allowance so garbage cannot crowd out the same peer's real traffic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IngressLimits {
     /// Largest accepted message, checked before it is decoded.
     pub max_message: usize,
     pub window: Duration,
-    pub messages_per_window: u32,
     pub bytes_per_window: usize,
+    pub messages_per_window: u32,
+    pub malformed_per_window: u32,
     pub resume_per_window: u32,
 }
 
@@ -29,8 +33,9 @@ impl Default for IngressLimits {
         Self {
             max_message: 32 << 20,
             window: Duration::from_secs(1),
-            messages_per_window: 4096,
             bytes_per_window: 64 << 20,
+            messages_per_window: 4096,
+            malformed_per_window: 65_536,
             resume_per_window: 32,
         }
     }
@@ -39,8 +44,9 @@ impl Default for IngressLimits {
 #[derive(Clone, Copy)]
 struct Window {
     start: Instant,
-    messages: u32,
     bytes: usize,
+    messages: u32,
+    malformed: u32,
     resume: u32,
 }
 
@@ -48,8 +54,9 @@ impl Window {
     fn new(start: Instant) -> Self {
         Self {
             start,
-            messages: 0,
             bytes: 0,
+            messages: 0,
+            malformed: 0,
             resume: 0,
         }
     }
@@ -84,27 +91,46 @@ impl Ingress {
             .retain(|_, w| clock.saturating_duration_since(w.start) < window);
     }
 
+    /// Before decoding: size and bandwidth. Evidence is exempt from the bandwidth budget.
     pub(crate) fn admit(&mut self, from: Peer, bytes: &[u8]) -> Result<(), ReceiveError> {
         if bytes.len() > self.limits.max_message {
             return Err(ReceiveError::TooLarge);
         }
-        let tag = bytes.first().copied();
-        if tag == Some(EVIDENCE_TAG) {
+        if bytes.first() == Some(&EVIDENCE_TAG) {
             return Ok(());
         }
-        let limits = self.limits;
+        let limit = self.limits.bytes_per_window;
+        let w = self.window(from);
+        w.bytes = w.bytes.saturating_add(bytes.len());
+        refuse_if(w.bytes > limit)
+    }
+
+    /// After a successful decode: the message will cost signature work.
+    pub(crate) fn charge(&mut self, from: Peer, tag: u8) -> Result<(), ReceiveError> {
+        if tag == EVIDENCE_TAG {
+            return Ok(());
+        }
+        let (messages, resume) = (
+            self.limits.messages_per_window,
+            self.limits.resume_per_window,
+        );
         let w = self.window(from);
         w.messages = w.messages.saturating_add(1);
-        w.bytes = w.bytes.saturating_add(bytes.len());
-        let resume = tag == Some(RESUME_TAG);
-        w.resume = w.resume.saturating_add(u32::from(resume));
-        let over = w.messages > limits.messages_per_window
-            || w.bytes > limits.bytes_per_window
-            || w.resume > limits.resume_per_window;
-        if over {
-            return Err(ReceiveError::Throttled);
+        w.resume = w.resume.saturating_add(u32::from(tag == RESUME_TAG));
+        refuse_if(w.messages > messages || w.resume > resume)
+    }
+
+    /// A message that failed to decode. Reported as malformed until the peer sends so many that
+    /// it is plainly a flood.
+    pub(crate) fn malformed(&mut self, from: Peer) -> ReceiveError {
+        let limit = self.limits.malformed_per_window;
+        let w = self.window(from);
+        w.malformed = w.malformed.saturating_add(1);
+        if w.malformed > limit {
+            ReceiveError::Throttled
+        } else {
+            ReceiveError::Malformed
         }
-        Ok(())
     }
 
     fn window(&mut self, from: Peer) -> &mut Window {
@@ -124,5 +150,13 @@ impl Ingress {
             *w = Window::new(clock);
         }
         w
+    }
+}
+
+fn refuse_if(over: bool) -> Result<(), ReceiveError> {
+    if over {
+        Err(ReceiveError::Throttled)
+    } else {
+        Ok(())
     }
 }

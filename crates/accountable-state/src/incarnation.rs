@@ -14,6 +14,9 @@ pub(crate) fn next(storage: &DurableStorage) -> Result<u64, OpenError> {
         file: path.display().to_string(),
         error: e,
     };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| fail(e.to_string()))?;
+    }
     let previous = match std::fs::read(&path) {
         Ok(b) => <[u8; 8]>::try_from(b.as_slice())
             .map(u64::from_le_bytes)

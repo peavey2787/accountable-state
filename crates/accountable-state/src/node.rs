@@ -142,7 +142,10 @@ impl<M: StateMachine + Clone> AccountableState<M> {
     /// Bytes from a member's reliable pipeline or from a pinned witness service.
     pub fn receive(&mut self, from: Peer, bytes: &[u8]) -> Result<(), ReceiveError> {
         self.ingress.admit(from, bytes)?;
-        let msg = PipeMsg::decode(bytes).map_err(|_| ReceiveError::Malformed)?;
+        let Ok(msg) = PipeMsg::decode(bytes) else {
+            return Err(self.ingress.malformed(from));
+        };
+        self.ingress.charge(from, bytes[0])?;
         match (from, msg) {
             (Peer::Member(id), msg) => {
                 if let PipeMsg::Auth(a) = &msg {

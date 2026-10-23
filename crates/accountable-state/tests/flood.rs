@@ -4,6 +4,7 @@ use accountable_state::{
     AccountableState, Config, DisclosurePolicy, DurableStorage, IngressLimits, Peer,
     PipelineConfig, ReceiveError, WitnessMode,
 };
+use gv_edge::live::resume::ResumeMsg;
 use gv_edge::live::PipeMsg;
 use gv_edge::testkit::GridRules;
 use std::time::{Duration, Instant};
@@ -42,6 +43,7 @@ fn limits() -> IngressLimits {
         max_message: 1024,
         window: Duration::from_secs(1),
         messages_per_window: 100,
+        malformed_per_window: 500,
         bytes_per_window: 1 << 20,
         resume_per_window: 3,
     }
@@ -105,7 +107,10 @@ fn evidence_is_never_throttled() {
 fn resume_traffic_has_a_smaller_budget_than_ordinary_traffic() {
     let mut n = node("resume");
     n.set_ingress_limits(limits());
-    let results: Vec<_> = (0..10).map(|_| n.receive(peer(1), &[15, 0])).collect();
+    let sync = PipeMsg::Resume(ResumeMsg::Sync { tip: 0 })
+        .encode()
+        .unwrap();
+    let results: Vec<_> = (0..10).map(|_| n.receive(peer(1), &sync)).collect();
     assert!(results[3..]
         .iter()
         .all(|r| *r == Err(ReceiveError::Throttled)));
@@ -113,4 +118,41 @@ fn resume_traffic_has_a_smaller_budget_than_ordinary_traffic() {
         n.receive(peer(1), &PipeMsg::AnchorReq.encode().unwrap()),
         Err(ReceiveError::Throttled)
     );
+}
+
+#[test]
+fn garbage_does_not_use_up_the_budget_of_the_same_peers_real_messages() {
+    let mut n = node("garbage");
+    n.set_ingress_limits(limits());
+    for _ in 0..400 {
+        assert_eq!(
+            n.receive(peer(1), &[0xFF, 1, 2, 3]),
+            Err(ReceiveError::Malformed)
+        );
+    }
+    assert_eq!(
+        n.receive(peer(1), &PipeMsg::AnchorReq.encode().unwrap()),
+        Ok(())
+    );
+    for _ in 0..200 {
+        let _ = n.receive(peer(1), &[0xFF]);
+    }
+    assert_eq!(
+        n.receive(peer(1), &[0xFF]),
+        Err(ReceiveError::Throttled),
+        "a plain flood is refused"
+    );
+}
+
+#[test]
+fn bandwidth_is_budgeted_before_decoding() {
+    let mut n = node("bytes");
+    n.set_ingress_limits(IngressLimits {
+        bytes_per_window: 5000,
+        ..limits()
+    });
+    let junk = vec![0xFFu8; 1000];
+    let results: Vec<_> = (0..10).map(|_| n.receive(peer(1), &junk)).collect();
+    assert_eq!(results[4], Err(ReceiveError::Malformed));
+    assert_eq!(results[5], Err(ReceiveError::Throttled));
 }
