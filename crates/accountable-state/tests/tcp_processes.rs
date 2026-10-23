@@ -238,10 +238,35 @@ fn accept_players(listener: TcpListener, tx: mpsc::Sender<Hub>) {
     }
 }
 
+/// How the relay treats gameplay frames between players: a lossy, jittery, duplicating network.
+/// Reordering follows from jitter. Control and witness frames are never impaired.
+#[derive(Clone, Copy, Default)]
+struct Impairment {
+    drop_percent: u64,
+    duplicate_percent: u64,
+    delay_ms: u64,
+    jitter_ms: u64,
+}
+
+/// A small deterministic generator, so an impaired run is repeatable.
+struct Dice(u64);
+
+impl Dice {
+    fn roll(&mut self, below: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % below.max(1)
+    }
+}
+
 struct Relay {
     links: Vec<Option<TcpStream>>,
     witnesses: Vec<RegisterWitness<FileCellStore>>,
     ids: Vec<[u8; 32]>,
+    impairment: Impairment,
+    dice: Dice,
+    in_flight: Vec<(Instant, usize, Vec<u8>)>,
 }
 
 impl Relay {
@@ -276,8 +301,34 @@ impl Relay {
         match frame[1] {
             ALL => (0..PLAYERS)
                 .filter(|o| *o != from)
-                .for_each(|o| self.tell(o, &body)),
-            to => self.tell(usize::from(to), &body),
+                .for_each(|o| self.impaired(o, &body)),
+            to => self.impaired(usize::from(to), &body),
+        }
+    }
+
+    /// Hand a gameplay frame to the network model: it may be lost, delayed, or delivered twice.
+    fn impaired(&mut self, to: usize, body: &[u8]) {
+        let i = self.impairment;
+        if self.dice.roll(100) < i.drop_percent {
+            return;
+        }
+        let copies = 1 + usize::from(self.dice.roll(100) < i.duplicate_percent);
+        for _ in 0..copies {
+            let wait = Duration::from_millis(i.delay_ms + self.dice.roll(i.jitter_ms + 1));
+            self.in_flight
+                .push((Instant::now() + wait, to, body.to_vec()));
+        }
+        self.deliver_due();
+    }
+
+    fn deliver_due(&mut self) {
+        let now = Instant::now();
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.in_flight)
+            .into_iter()
+            .partition(|(at, _, _)| *at <= now);
+        self.in_flight = later;
+        for (_, to, body) in due {
+            self.tell(to, &body);
         }
     }
 
@@ -313,7 +364,7 @@ impl Relay {
     }
 }
 
-fn start_hub(dir: &Path) -> String {
+fn start_hub(dir: &Path, impairment: Impairment) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
@@ -329,11 +380,19 @@ fn start_hub(dir: &Path) -> String {
         links: (0..PLAYERS).map(|_| None).collect(),
         witnesses,
         ids: keys().iter().map(SigningKey::id).collect(),
+        impairment,
+        dice: Dice(0x9E37_79B9_7F4A_7C15),
+        in_flight: Vec::new(),
     };
     std::thread::spawn(move || {
         debug_assert_eq!(relay.ids.len(), PLAYERS);
-        while let Ok(event) = rx.recv() {
-            relay.handle(event);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(2)) {
+                Ok(event) => relay.handle(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            relay.deliver_due();
         }
     });
     addr
@@ -436,18 +495,32 @@ fn watch(out: impl Read, status: &Statuses) {
     }
 }
 
-#[test]
-fn a_killed_and_restarted_player_process_rejoins_over_tcp_without_being_accused() {
-    let dir = std::env::temp_dir().join(format!("as-tcp-{}", std::process::id()));
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("as-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let addr = start_hub(&dir);
-    let mut fleet = Fleet {
+    dir
+}
+
+fn fleet(dir: &Path, impairment: Impairment) -> Fleet {
+    Fleet {
         children: (0..PLAYERS).map(|_| None).collect(),
         status: Arc::default(),
-        addr,
-        dir: dir.clone(),
-    };
+        addr: start_hub(dir, impairment),
+        dir: dir.to_path_buf(),
+    }
+}
+
+fn assert_nobody_was_accused(fleet: &Fleet) {
+    for r in 0..PLAYERS {
+        assert_eq!(fleet.status(r).violations, 0, "player {r} saw a violation");
+    }
+}
+
+#[test]
+fn a_killed_and_restarted_player_process_rejoins_over_tcp_without_being_accused() {
+    let dir = scratch("tcp");
+    let mut fleet = fleet(&dir, Impairment::default());
     (0..PLAYERS).for_each(|r| fleet.start(r));
     fleet.wait_until("the group to play", |f| {
         (0..PLAYERS).all(|r| f.status(r).certified >= 60)
@@ -468,9 +541,30 @@ fn a_killed_and_restarted_player_process_rejoins_over_tcp_without_being_accused(
     fleet.wait_until("everyone to play on together", |f| {
         (0..PLAYERS).all(|r| f.status(r).certified > live + 60)
     });
-    for r in 0..PLAYERS {
-        assert_eq!(fleet.status(r).violations, 0, "player {r} saw a violation");
-    }
+    assert_nobody_was_accused(&fleet);
+    drop(fleet);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Windows-friendly network impairment: real processes and sockets, with loss, duplication, latency,
+/// jitter and reordering applied by the relay, so no `tc`/`netem` (and no WSL) is needed.
+#[test]
+fn players_keep_certifying_over_a_lossy_jittery_duplicating_network_without_accusations() {
+    let dir = scratch("impaired");
+    let mut fleet = fleet(
+        &dir,
+        Impairment {
+            drop_percent: 5,
+            duplicate_percent: 5,
+            delay_ms: 30,
+            jitter_ms: 60,
+        },
+    );
+    (0..PLAYERS).for_each(|r| fleet.start(r));
+    fleet.wait_until("the group to certify through the impairment", |f| {
+        (0..PLAYERS).all(|r| f.status(r).certified >= 300)
+    });
+    assert_nobody_was_accused(&fleet);
     drop(fleet);
     let _ = std::fs::remove_dir_all(&dir);
 }

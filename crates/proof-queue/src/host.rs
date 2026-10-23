@@ -306,4 +306,45 @@ mod tests {
         }
         assert!(refused, "outbox backpressure");
     }
+
+    fn finish_order(q: &HostQueue) -> Vec<String> {
+        let json = q.events_after(0, 100);
+        json.split("},{")
+            .filter(|e| e.contains("\"state\":7"))
+            .map(|e| e.split("\"job\":\"").nth(1).unwrap()[..64].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_priority_number_orders_the_work_high_then_normal_then_low() {
+        let q = open(&[]);
+        let queue = |n: u8, priority: u8| {
+            let id = q
+                .submit(
+                    Family::SIGNED_INPUTS.0,
+                    &M,
+                    pack(&[vec![n]]),
+                    priority,
+                    None,
+                    1_000,
+                )
+                .unwrap();
+            super::hex(&id)
+        };
+        let (low, normal, high) = (queue(1, 2), queue(2, 1), queue(3, 0));
+        q.step(1_001).unwrap();
+        assert_eq!(finish_order(&q), vec![high, normal, low]);
+    }
+
+    #[test]
+    fn a_rewrite_replaces_everything_stored_before_it() {
+        let blob = |kind: u8, items: &[Vec<u8>]| [&[kind][..], &pack(items)].concat();
+        let (a, b, c) = (vec![1u8], vec![2u8], vec![3u8]);
+        let stored = [
+            blob(super::APPEND, &[a]),
+            blob(super::REWRITE, &[b.clone()]),
+            blob(super::APPEND, &[c.clone()]),
+        ];
+        assert_eq!(super::replay(&stored).unwrap(), vec![b, c]);
+    }
 }
