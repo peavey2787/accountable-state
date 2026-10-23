@@ -16,7 +16,7 @@ pub mod verify;
 
 pub use config::Config;
 pub use job::{Event, Family, Job, JobId, JobSpec, JobState, Outcome, Priority};
-pub use journal::{FileJournal, Journal, MemJournal, Opened};
+pub use journal::{FileJournal, Journal, MemJournal, Opened, OutboxJournal, Write};
 pub use metrics::Metrics;
 pub use queue::{Leased, OpenError, Page, Queue, Stats, SubmitError, Submitted};
 pub use result::{decide, match_status, Action, Ledger, MatchStatus, Settlement};

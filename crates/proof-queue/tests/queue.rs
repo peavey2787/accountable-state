@@ -512,3 +512,57 @@ fn thousands_of_jobs_with_restarts_keep_every_job_accounted_for() {
     }
     assert_eq!(q.stats().live, 0);
 }
+
+fn replay(persisted: &mut Vec<Vec<u8>>, writes: Vec<gv_proof_queue::Write>) {
+    for w in writes {
+        match w {
+            gv_proof_queue::Write::Append(r) => persisted.extend(r),
+            gv_proof_queue::Write::Rewrite(r) => *persisted = r,
+        }
+    }
+}
+
+#[test]
+fn a_host_persisted_journal_restores_exactly_what_the_host_stored() {
+    use gv_proof_queue::OutboxJournal;
+    let opened = OutboxJournal::open(Vec::new(), 1 << 20);
+    let outbox = opened.journal.clone();
+    let mut q = Queue::open(opened, Config::default(), 0).unwrap();
+    let ids: Vec<_> = (0..20)
+        .map(|n| q.submit(spec(1, n, Priority::Normal), 0).unwrap().id())
+        .collect();
+    run_one(&mut q, 1, Outcome::Valid);
+    let mut stored = Vec::new();
+    replay(&mut stored, outbox.take());
+    assert!(outbox.take().is_empty(), "taking clears the outbox");
+    drop(q);
+    let q = Queue::open(OutboxJournal::open(stored, 1 << 20), Config::default(), 2).unwrap();
+    assert_eq!(q.stats().retained, 20);
+    assert_eq!(
+        ids.iter()
+            .filter(|i| state(&q, i) == JobState::Verified)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_host_that_stops_persisting_makes_the_queue_refuse_work_not_grow() {
+    use gv_proof_queue::OutboxJournal;
+    let opened = OutboxJournal::open(Vec::new(), 2_000);
+    let outbox = opened.journal.clone();
+    let mut q = Queue::open(opened, Config::default(), 0).unwrap();
+    let mut accepted = 0;
+    let refused = loop {
+        match q.submit(spec(1, accepted, Priority::Normal), 0) {
+            Ok(_) => accepted += 1,
+            Err(e) => break e,
+        }
+        assert!(accepted < 1000, "the outbox must bound pending writes");
+    };
+    assert!(matches!(refused, SubmitError::Storage(_)));
+    assert!(accepted > 0);
+    let _ = outbox.take();
+    q.submit(spec(1, 9999, Priority::Normal), 0)
+        .expect("draining restores capacity");
+}

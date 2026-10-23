@@ -1,6 +1,7 @@
 //! Where queue records live. [`FileJournal`] is the durable, checksummed, append-only file (a torn
 //! tail from a crash is dropped at open); [`MemJournal`] is the same contract in memory, for tests
-//! (crash, capacity and failure injection) and for hosts without a file system.
+//! (crash, capacity and failure injection); [`OutboxJournal`] hands writes to a host that persists
+//! them itself (a browser's IndexedDB, an engine's save system).
 use gv_edge::audit::store::RecordFile;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -166,6 +167,95 @@ impl Journal for MemJournal {
         }
         s.records = records.to_vec();
         s.size = size;
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.state().size
+    }
+}
+
+/// One write a host must persist, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Write {
+    /// These records, after the ones already persisted.
+    Append(Vec<Vec<u8>>),
+    /// These records replace everything persisted (compaction).
+    Rewrite(Vec<Vec<u8>>),
+}
+
+/// A journal for hosts that cannot be written synchronously. Writes accumulate in an outbox the
+/// host drains with [`OutboxJournal::take`] and stores; a result is durable only once the host has
+/// stored the writes made before it, so a host acknowledges to its callers only after storing.
+/// The outbox is bounded: a host that stops draining makes the queue refuse work (backpressure)
+/// instead of growing without limit.
+#[derive(Clone)]
+pub struct OutboxJournal(Arc<Mutex<Outbox>>);
+
+struct Outbox {
+    pending: Vec<Write>,
+    pending_bytes: u64,
+    limit: u64,
+    size: u64,
+}
+
+impl OutboxJournal {
+    /// `persisted` are the records the host stored earlier; at most `limit` bytes may wait to be
+    /// drained.
+    pub fn open(persisted: Vec<Vec<u8>>, limit: u64) -> Opened<Self> {
+        let size = persisted.iter().map(|r| r.len() as u64 + FRAME).sum();
+        Opened {
+            journal: Self(Arc::new(Mutex::new(Outbox {
+                pending: Vec::new(),
+                pending_bytes: 0,
+                limit,
+                size,
+            }))),
+            records: persisted,
+            truncated: 0,
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, Outbox> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Everything the host must store, oldest first. Clears the outbox.
+    pub fn take(&self) -> Vec<Write> {
+        let mut s = self.state();
+        s.pending_bytes = 0;
+        std::mem::take(&mut s.pending)
+    }
+
+    fn push(&mut self, write: Write, bytes: u64) -> io::Result<()> {
+        let mut s = self.state();
+        if s.pending_bytes + bytes > s.limit {
+            return Err(io::Error::other(
+                "journal outbox is full: persist pending writes",
+            ));
+        }
+        s.pending_bytes += bytes;
+        s.pending.push(write);
+        Ok(())
+    }
+}
+
+fn framed(records: &[Vec<u8>]) -> u64 {
+    records.iter().map(|r| r.len() as u64 + FRAME).sum()
+}
+
+impl Journal for OutboxJournal {
+    fn append(&mut self, records: &[Vec<u8>]) -> io::Result<()> {
+        let bytes = framed(records);
+        self.push(Write::Append(records.to_vec()), bytes)?;
+        self.state().size += bytes;
+        Ok(())
+    }
+
+    fn rewrite(&mut self, records: &[Vec<u8>]) -> io::Result<()> {
+        let bytes = framed(records);
+        self.push(Write::Rewrite(records.to_vec()), bytes)?;
+        self.state().size = bytes;
         Ok(())
     }
 
