@@ -108,4 +108,30 @@ mod tests {
         assert!(Watermark::open(&storage).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn a_batch_whose_release_cannot_be_recorded_is_refused_and_nothing_moves() {
+        let dir = std::env::temp_dir().join(format!("gv-wm-full-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = DurableStorage::at(dir.join("node"));
+        let me = SigningKey::from_seed([1; 32]);
+        let mut w = Watermark::open(&storage).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
+
+        // A directory where the mark belongs makes the write fail, as a full or failing disk does.
+        let mark = storage.file(SUFFIX);
+        std::fs::remove_file(&mark).unwrap();
+        std::fs::create_dir(&mark).unwrap();
+        assert!(w.before_release(&batch(&me, 20), &me.id()).is_err());
+        assert_eq!(
+            w.through(),
+            20,
+            "an unrecorded batch is not counted as released"
+        );
+
+        std::fs::remove_dir(&mark).unwrap();
+        w.before_release(&batch(&me, 20), &me.id()).unwrap();
+        assert_eq!(Watermark::open(&storage).unwrap().through(), 40);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

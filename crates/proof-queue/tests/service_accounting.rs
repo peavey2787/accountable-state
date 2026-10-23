@@ -223,3 +223,32 @@ fn dropping_a_pool_stops_its_threads() {
     drop(WorkerPool::start(Arc::clone(&svc), 2));
     assert_no_work_after(&svc, "drop");
 }
+
+#[test]
+fn a_full_disk_stops_the_service_from_acknowledging_and_it_resumes_when_space_returns() {
+    let mem = MemJournal::new();
+    let queue = Queue::open(mem.open(), Config::default(), 0).unwrap();
+    let svc = Service::new(
+        queue,
+        Registry::new().with(AlwaysValid),
+        Box::new(SystemClock),
+        ServiceConfig::default(),
+    );
+    let first = svc.submit(spec(1, 1)).unwrap().id();
+
+    mem.set_failing(true);
+    assert!(
+        svc.submit(spec(1, 2)).is_err(),
+        "no acknowledgement without durability"
+    );
+    assert!(
+        svc.step().is_err(),
+        "a verdict that cannot be recorded is not reported"
+    );
+    assert_eq!(svc.job(&first).unwrap().state, JobState::Pending);
+
+    mem.set_failing(false);
+    assert_eq!(svc.step().unwrap(), 1);
+    assert_eq!(svc.job(&first).unwrap().state, JobState::Verified);
+    assert!(svc.metrics().storage_errors >= 2);
+}
