@@ -70,3 +70,44 @@ impl Metrics {
         0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Metrics;
+    use crate::job::JobState;
+
+    fn with_latencies(latencies: &[u64]) -> Metrics {
+        let mut m = Metrics::default();
+        for l in latencies {
+            m.record_finish(JobState::Verified, *l);
+        }
+        m
+    }
+
+    #[test]
+    fn finishes_are_counted_per_state() {
+        let mut m = with_latencies(&[1, 2]);
+        m.record_finish(JobState::Failed, 0);
+        assert_eq!(m.finished(JobState::Verified), 2);
+        assert_eq!(m.finished(JobState::Failed), 1);
+        assert_eq!(m.finished(JobState::Expired), 0);
+    }
+
+    #[test]
+    fn quantiles_are_power_of_two_upper_bounds() {
+        let m = with_latencies(&[0, 5, 100, 100]);
+        assert_eq!(m.latency_quantile(0.0), 0);
+        assert_eq!(m.latency_quantile(0.25), 0);
+        assert_eq!(m.latency_quantile(0.5), 8);
+        assert_eq!(m.latency_quantile(0.75), 128);
+        assert_eq!(m.latency_quantile(1.0), 128);
+        assert_eq!(with_latencies(&[1]).latency_quantile(1.0), 2);
+        assert_eq!(Metrics::default().latency_quantile(0.99), 0);
+    }
+
+    #[test]
+    fn an_enormous_latency_lands_in_the_last_bucket() {
+        let m = with_latencies(&[u64::MAX]);
+        assert_eq!(m.latency_quantile(1.0), 1u64 << 39);
+    }
+}

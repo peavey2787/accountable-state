@@ -1,6 +1,6 @@
 use gv_proof_queue::{
-    Config, Family, FileJournal, JobId, JobSpec, JobState, MemJournal, Outcome, Priority, Queue,
-    SubmitError, Submitted,
+    Config, Family, FileJournal, JobId, JobSpec, JobState, MemJournal, OpenError, Outcome,
+    Priority, Queue, SubmitError, Submitted,
 };
 
 const F: Family = Family::EQUIVOCATION;
@@ -244,6 +244,22 @@ fn dependencies_gate_execution_and_a_failed_dependency_ends_dependents_unverifie
 }
 
 #[test]
+fn a_verified_dependency_lets_its_dependent_run() {
+    let mut q = open(&MemJournal::new(), &Config::default());
+    let first = q.submit(spec(1, 1, Priority::Normal), 0).unwrap().id();
+    let mut later = spec(1, 2, Priority::Normal);
+    later.deps = vec![first];
+    let second = q.submit(later, 0).unwrap().id();
+    run_one(&mut q, 1, Outcome::Valid);
+    assert_eq!(state(&q, &first), JobState::Verified);
+    let next = q
+        .lease(2, ALL)
+        .unwrap()
+        .expect("the dependency is satisfied");
+    assert_eq!(next.id, second);
+}
+
+#[test]
 fn an_unknown_dependency_is_refused() {
     let mut q = open(&MemJournal::new(), &Config::default());
     let mut s = spec(1, 1, Priority::Normal);
@@ -329,7 +345,11 @@ fn a_full_disk_refuses_the_write_and_changes_nothing() {
     assert_eq!(state(&q, &kept), JobState::Pending);
     mem.set_capacity(None);
     q.submit(spec(1, 2, Priority::Normal), 0).unwrap();
-    assert!(q.metrics().storage_errors >= 2);
+    assert_eq!(
+        q.metrics().storage_errors,
+        2,
+        "the refused submit and the refused lease"
+    );
     drop(q);
     assert_eq!(open(&mem, &Config::default()).stats().retained, 2);
 }
@@ -406,6 +426,35 @@ fn a_subscriber_that_fell_behind_is_told_it_missed_notifications() {
     let page = q.events_after(cursor, 100);
     assert!(!page.gap);
     assert_eq!(page.events.len(), 3);
+
+    let oldest = q.events_after(0, 100).events[0].seq;
+    assert!(
+        !q.events_after(oldest - 1, 100).gap,
+        "a cursor just before the oldest retained notification missed nothing"
+    );
+    assert!(q.events_after(oldest - 2, 100).gap);
+}
+
+#[test]
+fn errors_say_what_went_wrong() {
+    let text = |e: SubmitError| e.to_string();
+    assert_eq!(text(SubmitError::TooLarge), "payload too large");
+    assert_eq!(text(SubmitError::Full), "queue is full");
+    assert_eq!(
+        text(SubmitError::MatchFull),
+        "match has too many unfinished jobs"
+    );
+    assert_eq!(
+        text(SubmitError::UnknownDependency([0; 32])),
+        "dependency is not in the queue"
+    );
+    let io = || std::io::Error::other("disk");
+    assert_eq!(text(SubmitError::Storage(io())), "journal: disk");
+    assert_eq!(
+        OpenError::Malformed { index: 4 }.to_string(),
+        "journal record 4 is malformed"
+    );
+    assert_eq!(OpenError::Storage(io()).to_string(), "journal: disk");
 }
 
 #[test]

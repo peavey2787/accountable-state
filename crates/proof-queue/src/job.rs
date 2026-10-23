@@ -186,3 +186,28 @@ pub struct Event {
     pub family: Family,
     pub state: JobState,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{JobState, Priority};
+
+    #[test]
+    fn every_state_and_priority_code_round_trips_and_nothing_else_decodes() {
+        for code in 0..=7u8 {
+            assert_eq!(JobState::from_code(code).map(JobState::code), Some(code));
+        }
+        assert!(JobState::from_code(8).is_none());
+        for code in 0..=2u8 {
+            assert_eq!(Priority::from_u8(code).map(|p| p as u8), Some(code));
+        }
+        assert!(Priority::from_u8(3).is_none());
+    }
+
+    #[test]
+    fn only_verified_and_certified_satisfy_a_dependency() {
+        let satisfying: Vec<u8> = (0..=7u8)
+            .filter(|c| JobState::from_code(*c).is_some_and(JobState::satisfies_dependency))
+            .collect();
+        assert_eq!(satisfying, vec![2, 3]);
+    }
+}
