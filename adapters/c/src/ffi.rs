@@ -86,6 +86,10 @@ unsafe fn put<T>(out: *mut T, value: T) -> Result<(), Failure> {
 /// # Safety
 /// As for `put`.
 unsafe fn put_bytes(out: *mut GvBuffer, bytes: Vec<u8>) -> Result<(), Failure> {
+    // A null `out` is refused before the bytes are handed over, so they are freed, not leaked.
+    if out.is_null() {
+        return Err(null());
+    }
     // SAFETY: forwarded; same contract as `put`.
     unsafe { put(out, GvBuffer::from_vec(bytes)) }
 }

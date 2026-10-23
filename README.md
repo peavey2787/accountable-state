@@ -96,4 +96,8 @@ All code in this repository is GPL-2.0-or-later (see `LICENSE`), matching Hydra'
 [Evidence export](docs/38-EVIDENCE-EXPORT.md) ·
 [Anchored recovery](docs/39-ANCHORED-RECOVERY.md) ·
 [Witness network](docs/40-WITNESS-NETWORK.md) ·
-[Remaining gaps](docs/42-REMAINING-GAPS.md)
+[Remaining gaps](docs/42-REMAINING-GAPS.md) ·
+[Proof queue and restart](docs/43-PROOF-QUEUE-RECONNECTION-RESTART.md) ·
+[Licensing](docs/44-LICENSING-AUDIT.md) ·
+[Release and operations](docs/45-RELEASE-AND-OPERATIONS.md) ·
+[Performance](docs/46-PERFORMANCE-REPORT.md)
