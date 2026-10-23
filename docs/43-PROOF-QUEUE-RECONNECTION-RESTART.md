@@ -46,6 +46,11 @@ window it already signed. Equivocation is judged on the signed record: ML-DSA si
 randomized, so the signature-inclusive digest of two honest signings differs and must not be
 compared.
 
+The same file keeps the released batches whose epoch is not yet certified. On restart they are
+sent again unchanged (`Pipeline::restore_own_batch`: same bytes, no new signature), because the
+ticks they cover are never signed a second time and an epoch needs every submitter's batch. This
+is what lets a match whose every process died in the middle of an epoch certify afterwards.
+
 The pipeline also enforces the floor in memory (`Pipeline::forbid_signing_below`, seeded from the
 watermark), starts the close timer from the local clock rather than from a tick number (a
 restarted node would otherwise close its epoch alone at once), and drops batches that start

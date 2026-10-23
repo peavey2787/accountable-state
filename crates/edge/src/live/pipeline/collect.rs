@@ -179,6 +179,23 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         self.auditor.record_my_batch(&b);
         Some(b)
     }
+    /// Take back a batch a previous process of this identity signed and released, and send it
+    /// again unchanged. It is the only way to complete the epoch it belongs to, because the ticks
+    /// it covers are never signed a second time.
+    pub fn restore_own_batch(&mut self, b: SignedEventBatch) {
+        let Some(slot) = self.my_slot() else { return };
+        let extends = self.replica.next_batch_head(self.me) == Some(b.record.previous_batch_hash);
+        let ok = b.verify().is_ok()
+            && b.record.participant == self.me
+            && b.record.match_id == self.session.match_id
+            && b.record.start_tick == self.ws()
+            && extends
+            && !self.collect.has_end(slot, end_of(&b));
+        if ok {
+            self.collect.batches[slot].push(b.clone());
+            self.enqueue(Outgoing::all(PipeMsg::Batch(b)));
+        }
+    }
     fn respond(&mut self, end: u64, own: OwnInputs<'_>) {
         let Some(slot) = self.my_slot() else { return };
         if self.collect.has_end(slot, end) {

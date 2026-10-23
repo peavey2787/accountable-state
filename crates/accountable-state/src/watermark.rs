@@ -1,9 +1,12 @@
-//! The tick up to which this participant has ever released a signed input batch. A batch is
-//! recorded durably before it leaves, so a restarted process resumes after it: re-signing a tick
-//! it already signed, with different inputs, would be equivocation by an honest player. The
-//! ticks in between are certified from the batches its peers kept.
+//! What this participant has ever released: the tick up to which it signed input batches, and the
+//! batches themselves while their epoch is uncertified. A batch is recorded durably before it
+//! leaves, so a restarted process resumes after it: re-signing a tick it already signed, with
+//! different inputs, would be equivocation by an honest player. The recorded batches are sent again
+//! on restart (the same bytes, never a new signature), so an epoch still certifies when every
+//! process of a match died in the middle of it.
 use crate::config::DurableStorage;
 use crate::io::OpenError;
+use gv_codec::SignedEventBatch;
 use gv_core::ParticipantId;
 use gv_edge::audit::fsync::replace_file;
 use gv_edge::live::PipeMsg;
@@ -11,10 +14,42 @@ use std::io;
 use std::path::PathBuf;
 
 const SUFFIX: &str = ".signed-through";
+const MARK: usize = 8;
+const LENGTH: usize = 4;
 
 pub(crate) struct Watermark {
     path: PathBuf,
     through: u64,
+    batches: Vec<SignedEventBatch>,
+}
+
+fn end_of(b: &SignedEventBatch) -> u64 {
+    b.record.start_tick + u64::from(b.record.tick_count)
+}
+
+fn encode(through: u64, batches: &[SignedEventBatch]) -> io::Result<Vec<u8>> {
+    let mut out = through.to_le_bytes().to_vec();
+    for b in batches {
+        let bytes = b.encode().map_err(|e| io::Error::other(format!("{e:?}")))?;
+        let len = u32::try_from(bytes.len()).map_err(io::Error::other)?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&bytes);
+    }
+    Ok(out)
+}
+
+fn decode(bytes: &[u8]) -> Option<(u64, Vec<SignedEventBatch>)> {
+    let (mark, mut rest) = bytes.split_at_checked(MARK)?;
+    let through = u64::from_le_bytes(mark.try_into().ok()?);
+    let mut batches = Vec::new();
+    while !rest.is_empty() {
+        let (len, tail) = rest.split_at_checked(LENGTH)?;
+        let len = usize::try_from(u32::from_le_bytes(len.try_into().ok()?)).ok()?;
+        let (body, tail) = tail.split_at_checked(len)?;
+        batches.push(SignedEventBatch::decode(body).ok()?);
+        rest = tail;
+    }
+    Some((through, batches))
 }
 
 impl Watermark {
@@ -26,32 +61,53 @@ impl Watermark {
             file: path.display().to_string(),
             error: e,
         };
-        let through = match std::fs::read(&path) {
-            Ok(b) => <[u8; 8]>::try_from(b.as_slice())
-                .map(u64::from_le_bytes)
-                .map_err(|_| fail("corrupt signed-through mark".into()))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+        let (through, batches) = match std::fs::read(&path) {
+            Ok(b) => decode(&b).ok_or_else(|| fail("corrupt signed-through mark".into()))?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (0, Vec::new()),
             Err(e) => return Err(fail(e.to_string())),
         };
-        Ok(Self { path, through })
+        Ok(Self {
+            path,
+            through,
+            batches,
+        })
     }
 
     pub(crate) fn through(&self) -> u64 {
         self.through
     }
 
-    /// Record, durably, that `msg` is about to be released. Only my own batches count. An error
+    /// Batches released and not yet covered by a certified epoch.
+    pub(crate) fn uncertified(&self) -> &[SignedEventBatch] {
+        &self.batches
+    }
+
+    /// Record, durably, that `msg` is about to be released; `verified` is the first tick not yet
+    /// certified, before which recorded batches are dropped. Only my own batches count. An error
     /// means the batch must not leave: it could not be remembered.
-    pub(crate) fn before_release(&mut self, msg: &PipeMsg, me: &ParticipantId) -> io::Result<()> {
+    pub(crate) fn before_release(
+        &mut self,
+        msg: &PipeMsg,
+        me: &ParticipantId,
+        verified: u64,
+    ) -> io::Result<()> {
         let PipeMsg::Batch(b) = msg else {
             return Ok(());
         };
-        let end = b.record.start_tick + u64::from(b.record.tick_count);
-        if b.record.participant != *me || end <= self.through {
+        if b.record.participant != *me || self.batches.iter().any(|x| x.record == b.record) {
             return Ok(());
         }
-        replace_file(&self.path, &end.to_le_bytes())?;
-        self.through = end;
+        let mut batches: Vec<SignedEventBatch> = self
+            .batches
+            .iter()
+            .filter(|x| end_of(x) > verified)
+            .cloned()
+            .collect();
+        batches.push(b.clone());
+        let through = self.through.max(end_of(b));
+        replace_file(&self.path, &encode(through, &batches)?)?;
+        self.through = through;
+        self.batches = batches;
         Ok(())
     }
 }
@@ -93,19 +149,68 @@ mod tests {
 
         let mut w = Watermark::open(&storage).unwrap();
         assert_eq!(w.through(), 0);
-        w.before_release(&batch(&me, 0), &me.id()).unwrap();
+        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
         assert_eq!(w.through(), 20);
-        w.before_release(&batch(&other, 100), &me.id()).unwrap();
+        w.before_release(&batch(&other, 100), &me.id(), 0).unwrap();
         assert_eq!(w.through(), 20, "someone else's batch is not mine");
-        w.before_release(&batch(&me, 0), &me.id()).unwrap();
+        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
         assert_eq!(w.through(), 20, "a resent batch does not move it");
-        w.before_release(&PipeMsg::AnchorReq, &me.id()).unwrap();
-        w.before_release(&batch(&me, 20), &me.id()).unwrap();
+        w.before_release(&PipeMsg::AnchorReq, &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 20), &me.id(), 0).unwrap();
         assert_eq!(w.through(), 40);
 
         assert_eq!(Watermark::open(&storage).unwrap().through(), 40);
         std::fs::write(storage.file(SUFFIX), b"xx").unwrap();
         assert!(Watermark::open(&storage).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn ends(w: &Watermark) -> Vec<u64> {
+        w.uncertified().iter().map(end_of).collect()
+    }
+
+    #[test]
+    fn released_batches_are_kept_until_their_epoch_certifies_and_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("gv-wm-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = DurableStorage::at(dir.join("node"));
+        let me = SigningKey::from_seed([1; 32]);
+        let mut w = Watermark::open(&storage).unwrap();
+        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        assert_eq!(ends(&w), vec![20], "a resent batch is stored once");
+        w.before_release(&batch(&me, 20), &me.id(), 0).unwrap();
+        assert_eq!(ends(&w), vec![20, 40]);
+        assert_eq!(ends(&Watermark::open(&storage).unwrap()), vec![20, 40]);
+
+        w.before_release(&batch(&me, 40), &me.id(), 20).unwrap();
+        assert_eq!(
+            ends(&w),
+            vec![40, 60],
+            "covered by a certified epoch: dropped"
+        );
+        assert_eq!(w.through(), 60);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_truncated_batch_record_is_a_corrupt_mark() {
+        let dir = std::env::temp_dir().join(format!("gv-wm-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = DurableStorage::at(dir.join("node"));
+        let me = SigningKey::from_seed([1; 32]);
+        let mut w = Watermark::open(&storage).unwrap();
+        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        let mut bytes = std::fs::read(storage.file(SUFFIX)).unwrap();
+        bytes.pop();
+        std::fs::write(storage.file(SUFFIX), &bytes).unwrap();
+        assert!(Watermark::open(&storage).is_err());
+        std::fs::write(storage.file(SUFFIX), 20u64.to_le_bytes()).unwrap();
+        assert_eq!(
+            Watermark::open(&storage).unwrap().through(),
+            20,
+            "an old mark-only file opens"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -116,13 +221,13 @@ mod tests {
         let storage = DurableStorage::at(dir.join("node"));
         let me = SigningKey::from_seed([1; 32]);
         let mut w = Watermark::open(&storage).unwrap();
-        w.before_release(&batch(&me, 0), &me.id()).unwrap();
+        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
 
         // A directory where the mark belongs makes the write fail, as a full or failing disk does.
         let mark = storage.file(SUFFIX);
         std::fs::remove_file(&mark).unwrap();
         std::fs::create_dir(&mark).unwrap();
-        assert!(w.before_release(&batch(&me, 20), &me.id()).is_err());
+        assert!(w.before_release(&batch(&me, 20), &me.id(), 0).is_err());
         assert_eq!(
             w.through(),
             20,
@@ -130,7 +235,7 @@ mod tests {
         );
 
         std::fs::remove_dir(&mark).unwrap();
-        w.before_release(&batch(&me, 20), &me.id()).unwrap();
+        w.before_release(&batch(&me, 20), &me.id(), 0).unwrap();
         assert_eq!(Watermark::open(&storage).unwrap().through(), 40);
         std::fs::remove_dir_all(dir).unwrap();
     }
