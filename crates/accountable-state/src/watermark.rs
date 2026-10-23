@@ -1,5 +1,5 @@
 //! What this participant has ever released: the tick up to which it signed input batches, and the
-//! batches themselves while their epoch is uncertified. A batch is recorded durably before it
+//! batches themselves (the most recent ones). A batch is recorded durably before it
 //! leaves, so a restarted process resumes after it: re-signing a tick it already signed, with
 //! different inputs, would be equivocation by an honest player. The recorded batches are sent again
 //! on restart (the same bytes, never a new signature), so an epoch still certifies when every
@@ -16,6 +16,9 @@ use std::path::PathBuf;
 const SUFFIX: &str = ".signed-through";
 const MARK: usize = 8;
 const LENGTH: usize = 4;
+/// How many released batches are kept: enough to replay several epochs when a match is resumed
+/// from an earlier shared point.
+const RETAINED: usize = 16;
 
 pub(crate) struct Watermark {
     path: PathBuf,
@@ -77,33 +80,24 @@ impl Watermark {
         self.through
     }
 
-    /// Batches released and not yet covered by a certified epoch.
-    pub(crate) fn uncertified(&self) -> &[SignedEventBatch] {
+    /// The most recent released batches, oldest first.
+    pub(crate) fn retained(&self) -> &[SignedEventBatch] {
         &self.batches
     }
 
-    /// Record, durably, that `msg` is about to be released; `verified` is the first tick not yet
-    /// certified, before which recorded batches are dropped. Only my own batches count. An error
+    /// Record, durably, that `msg` is about to be released. Only my own batches count. An error
     /// means the batch must not leave: it could not be remembered.
-    pub(crate) fn before_release(
-        &mut self,
-        msg: &PipeMsg,
-        me: &ParticipantId,
-        verified: u64,
-    ) -> io::Result<()> {
+    pub(crate) fn before_release(&mut self, msg: &PipeMsg, me: &ParticipantId) -> io::Result<()> {
         let PipeMsg::Batch(b) = msg else {
             return Ok(());
         };
         if b.record.participant != *me || self.batches.iter().any(|x| x.record == b.record) {
             return Ok(());
         }
-        let mut batches: Vec<SignedEventBatch> = self
-            .batches
-            .iter()
-            .filter(|x| end_of(x) > verified)
-            .cloned()
-            .collect();
+        let mut batches = self.batches.clone();
         batches.push(b.clone());
+        let surplus = batches.len().saturating_sub(RETAINED);
+        batches.drain(..surplus);
         let through = self.through.max(end_of(b));
         replace_file(&self.path, &encode(through, &batches)?)?;
         self.through = through;
@@ -149,14 +143,14 @@ mod tests {
 
         let mut w = Watermark::open(&storage).unwrap();
         assert_eq!(w.through(), 0);
-        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
         assert_eq!(w.through(), 20);
-        w.before_release(&batch(&other, 100), &me.id(), 0).unwrap();
+        w.before_release(&batch(&other, 100), &me.id()).unwrap();
         assert_eq!(w.through(), 20, "someone else's batch is not mine");
-        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
         assert_eq!(w.through(), 20, "a resent batch does not move it");
-        w.before_release(&PipeMsg::AnchorReq, &me.id(), 0).unwrap();
-        w.before_release(&batch(&me, 20), &me.id(), 0).unwrap();
+        w.before_release(&PipeMsg::AnchorReq, &me.id()).unwrap();
+        w.before_release(&batch(&me, 20), &me.id()).unwrap();
         assert_eq!(w.through(), 40);
 
         assert_eq!(Watermark::open(&storage).unwrap().through(), 40);
@@ -166,30 +160,33 @@ mod tests {
     }
 
     fn ends(w: &Watermark) -> Vec<u64> {
-        w.uncertified().iter().map(end_of).collect()
+        w.retained().iter().map(end_of).collect()
     }
 
     #[test]
-    fn released_batches_are_kept_until_their_epoch_certifies_and_survive_a_restart() {
+    fn released_batches_are_kept_in_order_and_survive_a_restart() {
         let dir = std::env::temp_dir().join(format!("gv-wm-keep-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = DurableStorage::at(dir.join("node"));
         let me = SigningKey::from_seed([1; 32]);
         let mut w = Watermark::open(&storage).unwrap();
-        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
-        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
         assert_eq!(ends(&w), vec![20], "a resent batch is stored once");
-        w.before_release(&batch(&me, 20), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 20), &me.id()).unwrap();
         assert_eq!(ends(&w), vec![20, 40]);
         assert_eq!(ends(&Watermark::open(&storage).unwrap()), vec![20, 40]);
 
-        w.before_release(&batch(&me, 40), &me.id(), 20).unwrap();
+        for n in 2..(RETAINED as u64 + 3) {
+            w.before_release(&batch(&me, n * 20), &me.id()).unwrap();
+        }
         assert_eq!(
-            ends(&w),
-            vec![40, 60],
-            "covered by a certified epoch: dropped"
+            w.retained().len(),
+            RETAINED,
+            "only the most recent are kept"
         );
-        assert_eq!(w.through(), 60);
+        assert_eq!(w.through(), (RETAINED as u64 + 3) * 20);
+        assert_eq!(w.retained().last().map(end_of), Some(w.through()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -200,7 +197,7 @@ mod tests {
         let storage = DurableStorage::at(dir.join("node"));
         let me = SigningKey::from_seed([1; 32]);
         let mut w = Watermark::open(&storage).unwrap();
-        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
         let mut bytes = std::fs::read(storage.file(SUFFIX)).unwrap();
         bytes.pop();
         std::fs::write(storage.file(SUFFIX), &bytes).unwrap();
@@ -221,13 +218,13 @@ mod tests {
         let storage = DurableStorage::at(dir.join("node"));
         let me = SigningKey::from_seed([1; 32]);
         let mut w = Watermark::open(&storage).unwrap();
-        w.before_release(&batch(&me, 0), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 0), &me.id()).unwrap();
 
         // A directory where the mark belongs makes the write fail, as a full or failing disk does.
         let mark = storage.file(SUFFIX);
         std::fs::remove_file(&mark).unwrap();
         std::fs::create_dir(&mark).unwrap();
-        assert!(w.before_release(&batch(&me, 20), &me.id(), 0).is_err());
+        assert!(w.before_release(&batch(&me, 20), &me.id()).is_err());
         assert_eq!(
             w.through(),
             20,
@@ -235,7 +232,7 @@ mod tests {
         );
 
         std::fs::remove_dir(&mark).unwrap();
-        w.before_release(&batch(&me, 20), &me.id(), 0).unwrap();
+        w.before_release(&batch(&me, 20), &me.id()).unwrap();
         assert_eq!(Watermark::open(&storage).unwrap().through(), 40);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -84,10 +84,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             .ok_or(OpenError::NotInRoster)?;
         pipe.set_incarnation(crate::incarnation::next(&config.storage)?);
         pipe.forbid_signing_below(watermark.through());
-        watermark
-            .uncertified()
-            .iter()
-            .for_each(|b| pipe.restore_own_batch(b.clone()));
+        pipe.restore_own_batches(watermark.retained().to_vec());
         for w in &config.witnesses {
             pipe.auditor_mut().admit_witness(*w);
         }
@@ -363,10 +360,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         if let PipeMsg::Auth(a) = &out.msg {
             self.queue_for_witness(WitnessOut::Auth(Box::new(a.clone())));
         }
-        if let Err(e) = self
-            .watermark
-            .before_release(&out.msg, &self.me, self.pipe.verified_tick())
-        {
+        if let Err(e) = self.watermark.before_release(&out.msg, &self.me) {
             return Some(Output::Event(PipeEvent::Fault(format!(
                 "signed batch withheld, its release could not be recorded: {e}"
             ))));

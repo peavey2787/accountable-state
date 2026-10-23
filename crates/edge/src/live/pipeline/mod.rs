@@ -60,6 +60,8 @@ pub struct Pipeline<R: StateMachine + Clone> {
     resume: resume::ResumeState,
     /// Ticks below this were signed by an earlier process of this identity.
     signed_floor: u64,
+    /// Batches an earlier process of this identity signed, sent again as their epoch comes up.
+    restorable: Vec<gv_codec::SignedEventBatch>,
 }
 
 impl<R: StateMachine + Clone> Pipeline<R> {
@@ -106,6 +108,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             last_peer_checkpoint: None,
             resume: resume::ResumeState::new(0),
             signed_floor: 0,
+            restorable: Vec::new(),
         })
     }
     /// The durable per-storage open counter: a larger one supersedes an older process of the
@@ -184,6 +187,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
     /// Call after every simulated tick (`now` = number of ticks simulated).
     pub fn tick(&mut self, now: u64, own: OwnInputs<'_>) {
         self.clock = self.clock.max(now);
+        self.restore_due();
         self.propose_or_respond(now, own);
         self.drive_sealed(now, own);
         self.drain_future(now, own);

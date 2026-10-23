@@ -179,21 +179,34 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         self.auditor.record_my_batch(&b);
         Some(b)
     }
-    /// Take back a batch a previous process of this identity signed and released, and send it
-    /// again unchanged. It is the only way to complete the epoch it belongs to, because the ticks
-    /// it covers are never signed a second time.
-    pub fn restore_own_batch(&mut self, b: SignedEventBatch) {
+    /// Remember batches a previous process of this identity signed and released. The ticks they
+    /// cover are never signed a second time, so sending them again, unchanged, is the only way to
+    /// complete their epochs.
+    pub fn restore_own_batches(&mut self, batches: Vec<SignedEventBatch>) {
+        self.restorable = batches;
+        self.restore_due();
+    }
+    /// Send again the remembered batches that start at the verified tick.
+    pub(super) fn restore_due(&mut self) {
+        if self.restorable.is_empty() {
+            return;
+        }
+        let ws = self.ws();
+        self.restorable.retain(|b| b.record.start_tick >= ws);
         let Some(slot) = self.my_slot() else { return };
-        let extends = self.replica.next_batch_head(self.me) == Some(b.record.previous_batch_hash);
-        let ok = b.verify().is_ok()
-            && b.record.participant == self.me
-            && b.record.match_id == self.session.match_id
-            && b.record.start_tick == self.ws()
-            && extends
-            && !self.collect.has_end(slot, end_of(&b));
-        if ok {
-            self.collect.batches[slot].push(b.clone());
-            self.enqueue(Outgoing::all(PipeMsg::Batch(b)));
+        let due: Vec<SignedEventBatch> = self
+            .restorable
+            .iter()
+            .filter(|b| b.record.start_tick == ws && !self.collect.has_end(slot, end_of(b)))
+            .cloned()
+            .collect();
+        for b in due {
+            let extends =
+                self.replica.next_batch_head(self.me) == Some(b.record.previous_batch_hash);
+            if b.verify().is_ok() && b.record.participant == self.me && extends {
+                self.collect.batches[slot].push(b.clone());
+                self.enqueue(Outgoing::all(PipeMsg::Batch(b)));
+            }
         }
     }
     fn respond(&mut self, end: u64, own: OwnInputs<'_>) {
