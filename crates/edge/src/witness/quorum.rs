@@ -6,11 +6,11 @@ use crate::StateMachine;
 use gv_core::{MatchId, ParticipantId};
 
 /// Type-erased [`RegisterWitness`], so the node does not carry the store's type.
-pub(super) trait Responder {
+pub(super) trait Responder: Send {
     fn respond(&mut self, match_id: MatchId, msg: &QuorumMsg) -> Vec<QuorumMsg>;
 }
 
-impl<S: CellStore> Responder for RegisterWitness<S> {
+impl<S: CellStore + Send> Responder for RegisterWitness<S> {
     fn respond(&mut self, match_id: MatchId, msg: &QuorumMsg) -> Vec<QuorumMsg> {
         self.handle(match_id, msg)
     }
@@ -19,7 +19,7 @@ impl<S: CellStore> Responder for RegisterWitness<S> {
 impl<R: StateMachine + Clone> WitnessNode<R> {
     /// Act as a head-register acceptor. Requests are answered only for the player on the link:
     /// a link cannot recover, fence or store for anyone else.
-    pub fn enable_register<S: CellStore + 'static>(&mut self, witness: RegisterWitness<S>) {
+    pub fn enable_register<S: CellStore + Send + 'static>(&mut self, witness: RegisterWitness<S>) {
         self.register = Some(Box::new(witness));
     }
 

@@ -89,6 +89,8 @@ pub mod witness {
     /// What a witness service hands its player: `PipeMsg::Challenge` or `PipeMsg::Anchor`,
     /// encoded and passed to [`crate::AccountableState::receive`] as [`crate::Peer::Witness`].
     pub use gv_edge::live::PipeMsg;
+    /// The head register a witness runs and the cell store it keeps durable.
+    pub use gv_edge::quorum::{CellStore, FileCellStore, QuorumMsg, RegisterWitness};
     pub use gv_edge::witness::*;
 }
 
