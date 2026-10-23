@@ -1,0 +1,17 @@
+[package]
+name = "gv-proof-queue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-core = { path = "../core" }
+gv-codec = { path = "../codec" }
+gv-edge = { path = "../edge" }
+gv-replay = { path = "../replay" }
+gv-sig = { path = "../sig" }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+gv-edge = { path = "../edge", features = ["testkit", "ephemeral-store"] }

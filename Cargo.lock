@@ -1368,6 +1368,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gv-proof-queue"
+version = "0.1.0"
+dependencies = [
+ "gv-codec",
+ "gv-core",
+ "gv-edge",
+ "gv-replay",
+ "gv-sig",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "gv-replay"
 version = "0.1.0"
 dependencies = [
