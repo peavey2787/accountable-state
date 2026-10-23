@@ -22,6 +22,18 @@ window it already signed. Equivocation is judged on the signed record: ML-DSA si
 randomized, so the signature-inclusive digest of two honest signings differs and must not be
 compared.
 
+The pipeline also enforces the floor in memory (`Pipeline::forbid_signing_below`, seeded from the
+watermark), starts the close timer from the local clock rather than from a tick number (a
+restarted node would otherwise close its epoch alone at once), and drops batches that start
+before the window once an epoch finishes, so a late longer batch is never compared with the next
+window's batch and misread as equivocation.
+
+## Known limitation: close race
+If one node completes an epoch naturally while a coordinator closes the same window over a
+smaller batch set, honest nodes on different local clocks can fork that epoch. Safety holds
+(nothing finalizes without agreement and nobody is convicted), but the epoch stalls until
+resync or restart. Rolling back is unsafe because it would double-sign checkpoints.
+
 ## Gates not run in this environment
 Miri and ThreadSanitizer require a nightly toolchain; real WAN testing requires geographically
 separated hosts. Both are tracked as blocked, not passed.
