@@ -342,8 +342,8 @@ mod tests {
         let (a, b, c) = (vec![1u8], vec![2u8], vec![3u8]);
         let stored = [
             blob(super::APPEND, &[a]),
-            blob(super::REWRITE, &[b.clone()]),
-            blob(super::APPEND, &[c.clone()]),
+            blob(super::REWRITE, std::slice::from_ref(&b)),
+            blob(super::APPEND, std::slice::from_ref(&c)),
         ];
         assert_eq!(super::replay(&stored).unwrap(), vec![b, c]);
     }
