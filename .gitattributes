@@ -4,3 +4,5 @@
 *.cmd text eol=crlf
 # Fuzz inputs are raw bytes: never convert line endings.
 fuzz/corpus/** -text
+# Journal fixtures are raw bytes compared exactly: never convert line endings.
+crates/proof-queue/tests/fixtures/** -text
