@@ -766,6 +766,28 @@ impl Auditor {
         self.their_checkpoints.push(c.clone());
     }
 
+    /// Scripted equivocation: also send a validly signed head that forks the history at the
+    /// current position. A dishonest client sends it around the witness register, so this
+    /// does not wait for a committed head.
+    fn send_fork_if_scripted(&mut self) {
+        if !self.equivocate_next || self.log.is_empty() {
+            return;
+        }
+        self.equivocate_next = false;
+        let mut fork = AuditLog::new(self.match_id, self.me);
+        for i in 1..self.log.len() {
+            if let Ok(seg) = self.log.segment(i - 1, i) {
+                if let Some(e) = seg.entries.first() {
+                    let _ = fork.append(e.kind, e.payload.clone());
+                }
+            }
+        }
+        let _ = fork.append(255, b"forked-history".to_vec());
+        self.outbox.push_back(Outgoing::all(PipeMsg::Auth(
+            fork.sign_authenticator(self.ruleset, &self.key),
+        )));
+    }
+
     /// Once per epoch: publish my log head. Cheap: one signature per epoch.
     pub fn on_epoch(&mut self, now: u64) {
         self.now = self.now.max(now);
@@ -783,28 +805,14 @@ impl Auditor {
             let seq = self.log.len();
             self.want_cover(now, seq);
             self.pump_register();
+            self.send_fork_if_scripted();
             return;
         }
         let a = self.log.sign_authenticator(self.ruleset, &self.key);
         self.pin(&a);
         self.stats.authenticators_sent += 1;
         self.outbox.push_back(Outgoing::all(PipeMsg::Auth(a)));
-        if self.equivocate_next && !self.log.is_empty() {
-            self.equivocate_next = false;
-            // A forked history: same position, different head, validly signed.
-            let mut fork = AuditLog::new(self.match_id, self.me);
-            for i in 1..self.log.len() {
-                if let Ok(seg) = self.log.segment(i - 1, i) {
-                    if let Some(e) = seg.entries.first() {
-                        let _ = fork.append(e.kind, e.payload.clone());
-                    }
-                }
-            }
-            let _ = fork.append(255, b"forked-history".to_vec());
-            self.outbox.push_back(Outgoing::all(PipeMsg::Auth(
-                fork.sign_authenticator(self.ruleset, &self.key),
-            )));
-        }
+        self.send_fork_if_scripted();
         // Keep storage bounded without ever dropping entries an open challenge needs.
         self.log.prune_to_keep(LOG_KEEP);
     }
