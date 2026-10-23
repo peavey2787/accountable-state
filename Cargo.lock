@@ -10,6 +10,7 @@ dependencies = [
  "gv-core",
  "gv-edge",
  "gv-p2p",
+ "gv-proof-queue",
  "gv-replay",
  "gv-sig",
 ]

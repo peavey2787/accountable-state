@@ -33,6 +33,7 @@ mod incarnation;
 mod ingress;
 mod io;
 mod node;
+mod offload;
 mod own;
 mod persist;
 mod verifier;
@@ -44,6 +45,7 @@ pub use evidence::{EvidencePackage, ExportQuery};
 pub use ingress::IngressLimits;
 pub use io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, WitnessOut};
 pub use node::{AccountableState, StateView};
+pub use offload::{Finding, Findings, ProofOffload, ProofService};
 pub use verifier::{Reason, VerificationResult, VerifiedProof, VerifiedRecord, Verifier};
 
 pub use gv_core::{Digest, MatchId, ParticipantId};
@@ -99,4 +101,13 @@ pub mod witness {
 #[cfg(feature = "p2p")]
 pub mod transport {
     pub use gv_p2p::*;
+}
+
+/// The durable proof queue that [`ProofOffload`] hands evidence to.
+pub mod proofs {
+    pub use gv_proof_queue::verify::{Equivocation, Registry, TransitionVerifier};
+    pub use gv_proof_queue::{
+        Config as QueueConfig, Family, FileJournal, Queue, Service, ServiceConfig, SystemClock,
+        WorkerPool,
+    };
 }

@@ -1,4 +1,4 @@
-use gv_proof_queue::{FileJournal, Journal, MemJournal};
+use gv_proof_queue::{FileJournal, Journal, MemJournal, OutboxJournal, Write};
 
 fn rec(n: usize) -> Vec<u8> {
     vec![n as u8; n]
@@ -85,4 +85,59 @@ fn a_file_journal_grows_with_appends_and_a_rewrite_replaces_its_content() {
     let again = FileJournal::open(&path).unwrap();
     assert_eq!(again.records, vec![rec(5), rec(6)]);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Framing overhead of one record, measured on an outbox rather than assumed.
+fn outbox_frame() -> u64 {
+    let mut j = OutboxJournal::open(vec![], u64::MAX).journal;
+    j.append(&[vec![]]).unwrap();
+    j.size()
+}
+
+#[test]
+fn an_outbox_journal_starts_with_the_size_of_what_the_host_stored() {
+    let f = outbox_frame();
+    let opened = OutboxJournal::open(vec![rec(10), rec(20)], u64::MAX);
+    assert_eq!(opened.journal.size(), (10 + f) + (20 + f));
+    assert_eq!(opened.records, vec![rec(10), rec(20)]);
+}
+
+#[test]
+fn an_outbox_journal_tracks_its_size_through_appends_and_rewrites() {
+    let f = outbox_frame();
+    let mut j = OutboxJournal::open(vec![rec(10)], u64::MAX).journal;
+    j.append(&[rec(5), rec(6)]).unwrap();
+    assert_eq!(j.size(), (10 + f) + (5 + f) + (6 + f));
+    j.append(&[rec(1)]).unwrap();
+    assert_eq!(j.size(), (10 + f) + (5 + f) + (6 + f) + (1 + f));
+    j.rewrite(&[rec(2), rec(3)]).unwrap();
+    assert_eq!(j.size(), (2 + f) + (3 + f));
+}
+
+#[test]
+fn the_host_drains_exactly_what_was_written_in_order() {
+    let mut j = OutboxJournal::open(vec![], u64::MAX).journal;
+    j.append(&[rec(1)]).unwrap();
+    j.rewrite(&[rec(2)]).unwrap();
+    let drained = j.take();
+    assert!(matches!(&drained[0], Write::Append(r) if r == &vec![rec(1)]));
+    assert!(matches!(&drained[1], Write::Rewrite(r) if r == &vec![rec(2)]));
+    assert!(j.take().is_empty());
+}
+
+#[test]
+fn an_outbox_accepts_writes_up_to_its_limit_and_refuses_beyond_until_drained() {
+    let f = outbox_frame();
+    let mut j = OutboxJournal::open(vec![], (10 + f) + (4 + f)).journal;
+    j.append(&[rec(10)]).unwrap();
+    j.append(&[rec(4)]).unwrap();
+    assert!(j.append(&[vec![]]).is_err(), "one record over the limit");
+    assert!(j.rewrite(&[vec![]]).is_err());
+    assert_eq!(
+        j.size(),
+        (10 + f) + (4 + f),
+        "a refused write changes nothing"
+    );
+    j.take();
+    j.append(&[rec(10)]).unwrap();
 }

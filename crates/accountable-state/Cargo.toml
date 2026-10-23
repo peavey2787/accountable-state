@@ -17,6 +17,7 @@ p2p = ["dep:gv-p2p"]
 gv-core = { path = "../core" }
 gv-edge = { path = "../edge" }
 gv-replay = { path = "../replay" }
+gv-proof-queue = { path = "../proof-queue" }
 gv-sig = { path = "../sig" }
 gv-p2p = { path = "../../adapters/p2p", features = ["native"], optional = true }
 

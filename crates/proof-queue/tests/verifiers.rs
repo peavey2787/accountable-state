@@ -1,10 +1,11 @@
 use gv_codec::{EventBatch, EventBody, HeldChange, SignedEventBatch};
+use gv_edge::audit::Authenticator;
 use gv_edge::audit::{AuditLog, Evidence};
-use gv_edge::quorum::WitnessSet;
+use gv_edge::quorum::{Ballot, Certificate, Claim, Receipt, WitnessSet};
 use gv_edge::{BatchCommitment, SignedBatchCommitment};
 use gv_proof_queue::verify::{
-    pack, unpack, Commitments, Equivocation, RecoveryCertificates, SignedInputs,
-    TransitionVerifier, Verifier,
+    pack, unpack, Commitments, Equivocation, RecoveryCertificates, Registry, SignedInputs,
+    TransitionVerifier, Verifier, MAX_ITEMS,
 };
 use gv_proof_queue::{Family, JobSpec, Outcome, Priority};
 use gv_sig::SigningKey;
@@ -196,4 +197,83 @@ fn a_transition_with_a_malformed_payload_is_invalid_not_a_violation() {
             Outcome::Invalid(_)
         ));
     }
+}
+
+#[test]
+fn a_pack_may_hold_exactly_the_maximum_number_of_items_and_no_more() {
+    let at_max = pack(&vec![Vec::<u8>::new(); MAX_ITEMS]);
+    assert_eq!(unpack(&at_max).map(|i| i.len()), Some(MAX_ITEMS));
+    let mut over = pack(&vec![Vec::<u8>::new(); MAX_ITEMS + 1]);
+    assert_eq!(over.len(), 4 + 4 * (MAX_ITEMS + 1));
+    assert!(unpack(&over).is_none(), "one item past the maximum");
+    over[..4].copy_from_slice(&(MAX_ITEMS as u32).to_le_bytes());
+    assert!(
+        unpack(&over).is_none(),
+        "trailing bytes after the last item"
+    );
+}
+
+struct ShortChanging;
+
+impl Verifier for ShortChanging {
+    fn family(&self) -> Family {
+        Family::EQUIVOCATION
+    }
+    fn verify(&self, _: &JobSpec) -> Outcome {
+        Outcome::Valid
+    }
+    fn verify_batch(&self, _: &[&JobSpec]) -> Vec<Outcome> {
+        vec![Outcome::Valid]
+    }
+}
+
+#[test]
+fn a_verifier_that_answers_for_the_wrong_number_of_jobs_is_a_fault_not_a_verdict() {
+    let registry = Registry::new().with(ShortChanging);
+    let s = spec(Family::EQUIVOCATION, vec![]);
+    let outcomes = registry.run(Family::EQUIVOCATION, &[&s, &s, &s]);
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes.iter().all(|o| matches!(o, Outcome::Retry(_))));
+    let outcomes = registry.run(Family::EQUIVOCATION, &[&s]);
+    assert_eq!(outcomes, vec![Outcome::Valid]);
+}
+
+fn certificate(owner: &SigningKey, witnesses: &[SigningKey], m: [u8; 32]) -> Certificate {
+    let auth = Authenticator::sign(m, [0; 32], 3, [4; 32], owner);
+    let claim = Claim::sign(Ballot::default(), auth, 20, owner);
+    let receipts = witnesses.iter().map(|w| Receipt::sign(&claim, w)).collect();
+    Certificate { claim, receipts }
+}
+
+fn cert_spec(c: &Certificate, m: [u8; 32]) -> JobSpec {
+    JobSpec {
+        match_id: m,
+        ..spec(Family::RECOVERY_CERTIFICATE, pack(&[c.encode()]))
+    }
+}
+
+#[test]
+fn a_recovery_certificate_is_certified_only_for_its_match_and_with_a_quorum() {
+    let owner = key(20);
+    let ws: Vec<SigningKey> = (30..34).map(key).collect();
+    let ids: Vec<_> = ws.iter().map(SigningKey::id).collect();
+    let v = RecoveryCertificates {
+        witnesses: WitnessSet::new(&ids).unwrap(),
+    };
+    let full = certificate(&owner, &ws, M);
+    assert_eq!(v.verify(&cert_spec(&full, M)), Outcome::Certified);
+    match v.verify(&cert_spec(&full, [8; 32])) {
+        Outcome::Invalid(why) => assert!(why.contains("another match"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let thin = certificate(&owner, &ws[..1], M);
+    assert!(matches!(
+        v.verify(&cert_spec(&thin, M)),
+        Outcome::Inconclusive(_)
+    ));
+    let two_items = JobSpec {
+        payload: pack(&[full.encode(), full.encode()]),
+        ..cert_spec(&full, M)
+    };
+    assert!(matches!(v.verify(&two_items), Outcome::Invalid(_)));
 }
