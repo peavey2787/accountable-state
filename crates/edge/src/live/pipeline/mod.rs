@@ -58,6 +58,8 @@ pub struct Pipeline<R: StateMachine + Clone> {
     epoch_done: bool,
     last_peer_checkpoint: Option<SignedCheckpoint>,
     resume: resume::ResumeState,
+    /// Ticks below this were signed by an earlier process of this identity.
+    signed_floor: u64,
 }
 
 impl<R: StateMachine + Clone> Pipeline<R> {
@@ -103,12 +105,18 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             epoch_done: false,
             last_peer_checkpoint: None,
             resume: resume::ResumeState::new(0),
+            signed_floor: 0,
         })
     }
     /// The durable per-storage open counter: a larger one supersedes an older process of the
     /// same identity. Set once, right after construction.
     pub fn set_incarnation(&mut self, incarnation: u64) {
         self.resume.incarnation = incarnation;
+    }
+    /// Never sign a batch for a window that starts below `tick`: an earlier process already
+    /// released signed inputs there, and signing other inputs for the same ticks is equivocation.
+    pub fn forbid_signing_below(&mut self, tick: u64) {
+        self.signed_floor = self.signed_floor.max(tick);
     }
     pub fn verified_tick(&self) -> u64 {
         self.replica.next_tick()

@@ -83,6 +83,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         let mut pipe = Pipeline::new(config.key.clone(), replica, config.pipeline)
             .ok_or(OpenError::NotInRoster)?;
         pipe.set_incarnation(crate::incarnation::next(&config.storage)?);
+        pipe.forbid_signing_below(watermark.through());
         for w in &config.witnesses {
             pipe.auditor_mut().admit_witness(*w);
         }

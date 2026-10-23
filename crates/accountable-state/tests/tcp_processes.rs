@@ -154,6 +154,9 @@ impl Tally {
     }
 }
 
+/// One game tick at 60 Hz.
+const TICK: Duration = Duration::from_millis(16);
+
 fn run_player(role: usize, addr: &str, dir: &Path) {
     let ids: Vec<_> = keys().iter().map(SigningKey::id).collect();
     let mut stream = TcpStream::connect(addr).unwrap();
@@ -162,17 +165,21 @@ fn run_player(role: usize, addr: &str, dir: &Path) {
     let mut node = open_node(dir, role);
     let mut tally = Tally::default();
     let (mut last_submit, mut last_status) = (Instant::now(), Instant::now());
+    let mut peers_up = 0;
     loop {
         while let Ok(frame) = frames.try_recv() {
+            peers_up += usize::from(frame[0] == PEER_UP);
             deliver(&mut node, &frame, &ids);
         }
+        // Play starts once everyone is connected, as in a lobby; a rejoiner starts at once.
+        let linked = peers_up >= PLAYERS - 1;
         while let Some(out) = node.poll(Instant::now()) {
             match out {
                 Output::Send(o) => send_output(&mut stream, o, &ids),
                 Output::Event(e) => tally.note(&e),
             }
         }
-        if last_submit.elapsed() >= Duration::from_millis(5) {
+        if linked && last_submit.elapsed() >= TICK {
             last_submit = Instant::now();
             let control = [LEFT, RIGHT, ACT, 0][(node.state().next_submit % 4) as usize];
             let _ = node.submit(&[control as u8, (control >> 8) as u8]);
@@ -385,7 +392,16 @@ impl Fleet {
     fn wait_until(&self, what: &str, done: impl Fn(&Fleet) -> bool) {
         let started = Instant::now();
         while !done(self) {
-            assert!(started.elapsed() < PATIENCE, "timed out waiting for {what}");
+            assert!(
+                started.elapsed() < PATIENCE,
+                "timed out waiting for {what}: certified {:?}",
+                self.status
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.certified)
+                    .collect::<Vec<_>>()
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }

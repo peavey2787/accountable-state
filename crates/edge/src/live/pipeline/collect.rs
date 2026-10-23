@@ -36,6 +36,13 @@ impl Collect {
             reported_silent: Vec::new(),
         }
     }
+    /// A longer batch for the epoch that just closed can arrive while it certifies; once the
+    /// window moves on it is stale, and must not be compared with the next window's batches.
+    pub(super) fn drop_before(&mut self, ws: u64) {
+        self.batches
+            .iter_mut()
+            .for_each(|slot| slot.retain(|b| b.record.start_tick >= ws));
+    }
     pub(super) fn reset_epoch(&mut self) {
         self.batches.iter_mut().for_each(Vec::clear);
         self.owed = None;
@@ -161,14 +168,14 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         }
         let slot = self.my_slot()?;
         let ws = self.ws();
-        if ws < self.auditor.sign_floor() {
+        if ws < self.auditor.sign_floor().max(self.signed_floor) {
             return None; // a previous incarnation's committed head covers these ticks
         }
         let head = self.replica.next_batch_head(self.me)?;
         let inputs = own(ws, end).filter(|i| i.len() as u64 == end - ws)?;
         let b = pack(self.session.match_id, self.me, head, ws, &inputs, &self.key)?;
         self.collect.batches[slot].push(b.clone());
-        self.collect.first_seen.get_or_insert(ws);
+        self.collect.first_seen.get_or_insert(self.clock);
         self.auditor.record_my_batch(&b);
         Some(b)
     }
@@ -413,7 +420,11 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             .into_iter()
             .filter(|s| !self.collect.batches[*s].is_empty())
             .collect();
-        let Some(end) = self.collect.common_end(&present) else {
+        let Some(end) = self
+            .collect
+            .common_end(&present)
+            .filter(|end| *end > self.ws())
+        else {
             return;
         };
         let batches: Vec<SignedEventBatch> = present
@@ -485,5 +496,37 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         }
         self.collect.reset_epoch();
         self.begin_epoch(inputs, false, now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn batch(key: &SigningKey, start: u64, count: u32) -> SignedEventBatch {
+        let record = EventBatch {
+            match_id: [1; 32],
+            participant: key.id(),
+            previous_batch_hash: [0; 32],
+            start_tick: start,
+            tick_count: count,
+            body: EventBody::Held {
+                initial: vec![0],
+                changes: vec![],
+            },
+        };
+        SignedEventBatch::sign(record, key).unwrap()
+    }
+
+    #[test]
+    fn a_late_batch_for_a_finished_window_is_dropped_when_the_window_moves_on() {
+        let key = SigningKey::from_seed([3; 32]);
+        let mut c = Collect::new(1);
+        c.batches[0].push(batch(&key, 100, 100));
+        c.batches[0].push(batch(&key, 180, 20));
+        c.drop_before(180);
+        assert_eq!(c.batches[0].len(), 1);
+        assert_eq!(c.batches[0][0].record.start_tick, 180);
+        assert!(c.has_end(0, 200));
     }
 }

@@ -276,6 +276,8 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             sealed: c.sealed,
         });
         self.stage = Stage::Collect;
+        let ws = self.ws();
+        self.collect.drop_before(ws);
         self.epoch_done = true;
     }
 }
