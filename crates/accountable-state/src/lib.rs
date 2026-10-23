@@ -29,6 +29,7 @@ mod config;
 mod evidence;
 #[cfg(feature = "fault-injection")]
 mod faults;
+mod incarnation;
 mod io;
 mod node;
 mod own;
@@ -54,7 +55,7 @@ pub use gv_edge::export::{
 pub use gv_edge::feed::{read_since, SignedEvent};
 pub use gv_edge::live::PipelineConfig;
 pub use gv_edge::live::{
-    AuditEvent, AuditStats, Dest, PipeEvent as Event, SealError, SealPolicy, Suspicion,
+    AuditEvent, AuditStats, Dest, PeerEvent, PipeEvent as Event, SealError, SealPolicy, Suspicion,
     SuspicionKind, Violation, ViolationKind,
 };
 pub use gv_edge::CertifiedMatch;

@@ -327,7 +327,7 @@ impl Persistence {
                     self.archive_complete = false;
                 }
                 self.dirty = true;
-                pipe.prune_history(2);
+                pipe.prune_history();
             }
             _ => self.archive_complete = false,
         }
@@ -348,7 +348,7 @@ impl Persistence {
                     sink.fault(format!("cannot encode receipts: {e:?}"));
                 }
                 self.dirty = true;
-                pipe.prune_history(2);
+                pipe.prune_history();
                 if due(self.last_save, now, SAVE_EVERY) {
                     self.save_archive(now, sink);
                 }

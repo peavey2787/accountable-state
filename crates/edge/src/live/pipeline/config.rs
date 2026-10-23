@@ -46,6 +46,9 @@ pub struct PipelineConfig {
     /// How long a dropped peer may stay away before the application is told its grace period
     /// ran out. Reporting it is not a verdict.
     pub peer_grace_ticks: u64,
+    /// Certified epochs kept in memory to bring a returning peer up to date; a peer further
+    /// behind needs the durable archive instead.
+    pub sync_history_epochs: usize,
     pub seal: Option<SealPolicy>,
 }
 impl PipelineConfig {
@@ -56,6 +59,7 @@ impl PipelineConfig {
             idle_input,
             close_after_ticks: None,
             peer_grace_ticks: 1800,
+            sync_history_epochs: 256,
             seal: None,
         }
     }

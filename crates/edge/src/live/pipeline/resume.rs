@@ -18,7 +18,12 @@ pub(super) struct ResumeState {
     challenged: BTreeMap<ParticipantId, [u8; 16]>,
     proven: BTreeMap<ParticipantId, SignedProof>,
     down_since: BTreeMap<ParticipantId, u64>,
+    /// When each peer was last asked for epochs, to pace repeated requests.
+    asked_at: BTreeMap<ParticipantId, u64>,
 }
+
+/// Ticks between sync requests to the same peer.
+const RESYNC_EVERY_TICKS: u64 = 20;
 
 fn nonce() -> [u8; 16] {
     gv_sig::random_32().map_or([0; 16], |r| r[..16].try_into().unwrap_or([0; 16]))
@@ -85,6 +90,21 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             tick: 0,
             seq: 0,
         });
+    }
+
+    /// A proven peer is working on a tick beyond my verified head: fetch what I am missing
+    /// (rate-limited per peer; the peer's answer is verified like any other).
+    pub(super) fn note_peer_ahead(&mut self, from: ParticipantId, their_tick: u64, now: u64) {
+        let tip = self.ws();
+        let due = self
+            .resume
+            .asked_at
+            .get(&from)
+            .is_none_or(|t| now >= t + RESYNC_EVERY_TICKS);
+        if their_tick > tip && due && self.resume.proven.contains_key(&from) {
+            self.resume.asked_at.insert(from, now);
+            self.send(from, ResumeMsg::Sync { tip });
+        }
     }
 
     pub(super) fn on_resume(&mut self, from: ParticipantId, msg: ResumeMsg) {

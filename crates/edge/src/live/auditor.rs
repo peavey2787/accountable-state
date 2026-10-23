@@ -159,6 +159,8 @@ struct AnchorCheck {
     answers: BTreeMap<ParticipantId, AnchorAnswer>,
     witness_answered: bool,
     wait_until: u64,
+    /// Tick of the last (re)request, so a retry is paced by time, not by message arrivals.
+    last_request: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,6 +168,9 @@ enum AnchorAnswer {
     Head,
     NoHeads,
 }
+
+/// Ticks between repeated anchor requests while peers have not answered.
+const ANCHOR_RETRY_TICKS: u64 = 120;
 
 /// Ticks to wait for a witness-held head after the peers answered an anchor check.
 pub const ANCHOR_WITNESS_WAIT: u64 = 600;
@@ -807,7 +812,9 @@ impl Auditor {
     /// Advance logical time: retransmit, suspect, release pins.
     pub fn tick(&mut self, now: u64) {
         self.now = self.now.max(now);
-        if self.anchor_pending && self.anchor.answers.len() < self.anchor_quorum && now % 120 == 0 {
+        let retry_due = now >= self.anchor.last_request + ANCHOR_RETRY_TICKS;
+        if self.anchor_pending && self.anchor.answers.len() < self.anchor_quorum && retry_due {
+            self.anchor.last_request = now;
             self.outbox.push_back(Outgoing::all(PipeMsg::AnchorReq)); // a peer may not have been connected yet
         }
         self.finish_anchor_check();

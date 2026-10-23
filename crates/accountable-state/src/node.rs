@@ -73,6 +73,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         let epoch_ticks = config.pipeline.epoch_ticks;
         let mut pipe = Pipeline::new(config.key.clone(), replica, config.pipeline)
             .ok_or(OpenError::NotInRoster)?;
+        pipe.set_incarnation(crate::incarnation::next(&config.storage)?);
         for w in &config.witnesses {
             pipe.auditor_mut().admit_witness(*w);
         }
@@ -154,6 +155,17 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             (Peer::Witness(_), _) => return Err(ReceiveError::NotAllowedFromWitness),
         }
         Ok(())
+    }
+
+    /// The transport connected to roster member `id` (first time or again): ask it to prove its
+    /// key and incarnation, then both sides sync certified epochs.
+    pub fn peer_up(&mut self, id: ParticipantId) {
+        self.pipe.peer_up(id);
+    }
+
+    /// The transport lost roster member `id`. Starts its grace period; nothing is concluded.
+    pub fn peer_down(&mut self, id: ParticipantId) {
+        self.pipe.peer_down(id, self.now);
     }
 
     /// The next thing to deliver or report, after time-driven housekeeping. Call until `None`.
@@ -250,6 +262,15 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         step(&mut self.pipe, self.now, &|from, to| own.range(from, to));
     }
 
+    /// A synced epoch can end beyond what this node has played (it was away): continue from
+    /// there, with no stale local inputs.
+    fn adopt_synced_tick(&mut self, end: u64) {
+        if end > self.now {
+            self.now = end;
+            self.own = OwnInputs::new(end);
+        }
+    }
+
     fn queue_for_witness(&mut self, m: WitnessOut) {
         if self.witnesses {
             self.outgoing.push_back(Outgoing::Witness(m));
@@ -262,6 +283,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             session: &self.session,
             disclosure: self.disclosure,
         };
+        let mut synced_to = 0;
         while let Some(ev) = self.pipe.poll_event() {
             let mut sink = Sink {
                 outgoing: &mut self.outgoing,
@@ -274,11 +296,16 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             {
                 self.own.release_before(end);
             }
-            if let PipeEvent::Finalized { checkpoint, .. } = &ev {
+            if let PipeEvent::Finalized {
+                checkpoint, end, ..
+            } = &ev
+            {
                 self.checkpoint = Some(*checkpoint);
+                synced_to = synced_to.max(*end);
             }
             self.events.push_back(ev);
         }
+        self.adopt_synced_tick(synced_to);
     }
 
     fn next_output(&mut self) -> Option<Output> {

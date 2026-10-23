@@ -122,10 +122,10 @@ impl<R: StateMachine + Clone> Pipeline<R> {
     pub fn session(&self) -> &Session {
         &self.session
     }
-    /// Keep only the newest `keep` accepted epochs in memory (see
-    /// [`MatchReplica::prune_accepted`]).
-    pub fn prune_history(&mut self, keep: usize) {
-        self.replica.prune_accepted(keep);
+    /// Keep only the newest `PipelineConfig::sync_history_epochs` accepted epochs in memory
+    /// (see [`MatchReplica::prune_accepted`]); the durable record is the receipt archive.
+    pub fn prune_history(&mut self) {
+        self.replica.prune_accepted(self.cfg.sync_history_epochs);
     }
     /// Next message to send. Nothing leaves before the write-ahead barrier: every log entry and
     /// signed head this participant has produced is durable first (`Auditor::make_durable`).
@@ -214,8 +214,14 @@ impl<R: StateMachine + Clone> Pipeline<R> {
     pub fn on_message(&mut self, from: ParticipantId, msg: PipeMsg, now: u64, own: OwnInputs<'_>) {
         self.clock = self.clock.max(now);
         match msg {
-            PipeMsg::Batch(b) => self.accept_batch(b, now, own),
-            PipeMsg::Checkpoint(c) => self.on_checkpoint(c, now),
+            PipeMsg::Batch(b) => {
+                self.note_peer_ahead(from, b.record.start_tick, now);
+                self.accept_batch(b, now, own);
+            }
+            PipeMsg::Checkpoint(c) => {
+                self.note_peer_ahead(from, c.claim.epoch_start, now);
+                self.on_checkpoint(c, now);
+            }
             PipeMsg::Close(c) => self.on_close(from, c, now),
             PipeMsg::Seal(s) => self.on_seal(from, s, now),
             PipeMsg::Resume(r) => self.on_resume(from, r),
