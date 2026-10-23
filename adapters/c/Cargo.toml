@@ -1,0 +1,17 @@
+[package]
+name = "gv-capi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C ABI for the accountable-state proof queue: Unity (P/Invoke), Unreal, Godot (GDExtension) and any other native host."
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+gv-proof-queue = { path = "../../crates/proof-queue" }
+
+[dev-dependencies]
+gv-codec = { path = "../../crates/codec" }
+gv-sig = { path = "../../crates/sig" }

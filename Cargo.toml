@@ -14,6 +14,7 @@ members = [
     "crates/accountable-state",
     "adapters/p2p",
     "adapters/wasm",
+    "adapters/c",
     "examples/movement",
     "examples/packed-match"
 ]

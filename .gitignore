@@ -26,3 +26,7 @@
 # cargo-fuzz build output and crash artifacts
 /fuzz/target
 /fuzz/artifacts
+
+# .NET smoke build output
+/adapters/c/dotnet-smoke/bin/
+/adapters/c/dotnet-smoke/obj/

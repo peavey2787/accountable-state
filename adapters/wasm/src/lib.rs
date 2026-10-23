@@ -2,7 +2,7 @@
 //! is tested natively); the wasm-bindgen class below only converts types.
 #![forbid(unsafe_code)]
 
-pub mod host;
+pub use gv_proof_queue::host;
 
 #[cfg(target_arch = "wasm32")]
 mod js;

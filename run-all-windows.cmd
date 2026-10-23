@@ -28,3 +28,5 @@ if errorlevel 1 (
 )
 REM 2. Compatibility with the newest p2p-net main (Cargo.lock is left unchanged).
 call scripts\newest-main-compat.cmd || exit /b 1
+REM 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI (explicit gate when dotnet is absent).
+call scripts\capi-dotnet-smoke.cmd || exit /b 1

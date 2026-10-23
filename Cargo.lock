@@ -1301,6 +1301,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gv-capi"
+version = "0.1.0"
+dependencies = [
+ "gv-codec",
+ "gv-proof-queue",
+ "gv-sig",
+]
+
+[[package]]
 name = "gv-codec"
 version = "0.1.0"
 dependencies = [
@@ -1423,8 +1432,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "gv-codec",
- "gv-core",
- "gv-edge",
  "gv-proof-queue",
  "gv-sig",
  "js-sys",

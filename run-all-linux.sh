@@ -21,3 +21,5 @@ else
 fi
 # 2. Compatibility with the newest p2p-net main (Cargo.lock is left unchanged).
 sh scripts/newest-main-compat.sh
+# 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI (explicit gate when dotnet is absent).
+sh scripts/capi-dotnet-smoke.sh

@@ -5,6 +5,7 @@
 //! published as a notification. A missing or late proof is never a conviction and a timeout is
 //! never a certification.
 pub mod config;
+pub mod host;
 pub mod job;
 pub mod journal;
 pub mod metrics;

@@ -1,15 +1,15 @@
 //! The proof queue as a browser host drives it: no threads, no file system. The page supplies the
 //! clock and stores the journal itself (IndexedDB), draining [`HostQueue::take_writes`] after
 //! every call that may have changed the queue and acknowledging callers only once stored.
-use gv_core::MatchId;
-use gv_edge::quorum::WitnessSet;
-use gv_proof_queue::verify::{
+use crate::verify::{
     pack, unpack, Commitments, Equivocation, RecoveryCertificates, Registry, SignedInputs,
 };
-use gv_proof_queue::{
+use crate::{
     Config, Family, JobId, JobSpec, ManualClock, MatchStatus, OutboxJournal, Priority, Queue,
     Service, ServiceConfig, Write,
 };
+use gv_core::MatchId;
+use gv_edge::quorum::WitnessSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -19,9 +19,9 @@ const REWRITE: u8 = 1;
 /// A clock the page sets on every call.
 struct PageClock(Arc<ManualClock>);
 
-impl gv_proof_queue::Clock for PageClock {
+impl crate::Clock for PageClock {
     fn now(&self) -> u64 {
-        gv_proof_queue::Clock::now(&*self.0)
+        crate::Clock::now(&*self.0)
     }
 }
 
@@ -212,9 +212,9 @@ fn describe(status: &MatchStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::HostQueue;
+    use crate::verify::pack;
+    use crate::Family;
     use gv_codec::{EventBatch, EventBody, SignedEventBatch};
-    use gv_proof_queue::verify::pack;
-    use gv_proof_queue::Family;
     use gv_sig::SigningKey;
 
     const M: [u8; 32] = [7; 32];
