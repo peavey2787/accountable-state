@@ -1,5 +1,6 @@
 use crate::config::{Config, WitnessMode};
 use crate::evidence::{Context, EvidencePackage, ExportQuery};
+use crate::ingress::{Ingress, IngressLimits};
 use crate::io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, WitnessOut};
 use crate::own::OwnInputs;
 use crate::persist::{Persistence, Sink};
@@ -48,6 +49,7 @@ pub struct AccountableState<M: StateMachine + Clone> {
     persist: Persistence,
     outgoing: VecDeque<Outgoing>,
     events: VecDeque<PipeEvent>,
+    ingress: Ingress,
 }
 
 impl<M: StateMachine + Clone> AccountableState<M> {
@@ -115,6 +117,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
             persist,
             outgoing,
             events,
+            ingress: Ingress::new(IngressLimits::default()),
         })
     }
 
@@ -138,6 +141,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
 
     /// Bytes from a member's reliable pipeline or from a pinned witness service.
     pub fn receive(&mut self, from: Peer, bytes: &[u8]) -> Result<(), ReceiveError> {
+        self.ingress.admit(from, bytes)?;
         let msg = PipeMsg::decode(bytes).map_err(|_| ReceiveError::Malformed)?;
         match (from, msg) {
             (Peer::Member(id), msg) => {
@@ -157,6 +161,11 @@ impl<M: StateMachine + Clone> AccountableState<M> {
         Ok(())
     }
 
+    /// Replace the per-peer ingress budget (defaults suit a real-time game).
+    pub fn set_ingress_limits(&mut self, limits: IngressLimits) {
+        self.ingress.set_limits(limits);
+    }
+
     /// The transport connected to roster member `id` (first time or again): ask it to prove its
     /// key and incarnation, then both sides sync certified epochs.
     pub fn peer_up(&mut self, id: ParticipantId) {
@@ -170,6 +179,7 @@ impl<M: StateMachine + Clone> AccountableState<M> {
 
     /// The next thing to deliver or report, after time-driven housekeeping. Call until `None`.
     pub fn poll(&mut self, now: Instant) -> Option<Output> {
+        self.ingress.advance(now);
         let mut sink = Sink {
             outgoing: &mut self.outgoing,
             events: &mut self.events,

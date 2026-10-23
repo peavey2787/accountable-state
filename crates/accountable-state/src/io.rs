@@ -74,4 +74,9 @@ pub enum SubmitError {
 pub enum ReceiveError {
     Malformed,
     NotAllowedFromWitness,
+    /// Larger than the configured maximum message; not decoded.
+    TooLarge,
+    /// The sender exceeded its per-window budget. Nothing was lost that matters: evidence is
+    /// never throttled. The host may slow or drop that link.
+    Throttled,
 }

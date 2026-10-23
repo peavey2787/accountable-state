@@ -30,6 +30,7 @@ mod evidence;
 #[cfg(feature = "fault-injection")]
 mod faults;
 mod incarnation;
+mod ingress;
 mod io;
 mod node;
 mod own;
@@ -39,6 +40,7 @@ pub mod view;
 
 pub use config::{Config, DurableStorage, WitnessMode};
 pub use evidence::{EvidencePackage, ExportQuery};
+pub use ingress::IngressLimits;
 pub use io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, WitnessOut};
 pub use node::{AccountableState, StateView};
 pub use verifier::{Reason, VerificationResult, VerifiedProof, VerifiedRecord, Verifier};
