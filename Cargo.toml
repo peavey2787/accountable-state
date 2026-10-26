@@ -34,3 +34,7 @@ sha2 = "0.10"
 # only; workspace crates keep fast debug builds and debug assertions.
 [profile.dev.package."*"]
 opt-level = 3
+
+# webrtc 0.17 pulls dtls 0.17.2 -> crypto-bigint 0.5.5 (RUSTSEC-2026-0387); p2p-net carries a fixed dtls.
+[patch.crates-io]
+dtls = { git = "https://github.com/peavey2787/p2p-net" }
