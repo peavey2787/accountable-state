@@ -10,6 +10,7 @@ members = [
     "crates/replay",
     "crates/privacy",
     "crates/zk",
+    "crates/zk-private",
     "crates/proof-queue",
     "crates/accountable-state",
     "adapters/p2p",

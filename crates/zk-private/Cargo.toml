@@ -1,0 +1,13 @@
+[package]
+name = "gv-zk-private"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gv-core = { path = "../core" }
+gv-zk = { path = "../zk" }
+serde_json = "1"
+sha2 = { workspace = true }
+zk-sdk = { git = "https://github.com/peavey2787/zk-sdk", rev = "cfc5a7ed042f76530a4e8425ef3b0ef21936c197" }
