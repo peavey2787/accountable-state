@@ -29,7 +29,7 @@ same mechanism Unity (Mono/IL2CPP) uses.
 | --- | --- |
 | WASM / browser | Verified (`wasm-pack test --node`) |
 | C ABI from Rust tests | Verified (`adapters/c/tests/capi.rs`) |
-| Unity-style .NET P/Invoke | Verified with the .NET SDK; prints an explicit "GATE NOT RUN" if `dotnet` is absent |
+| Unity-style .NET P/Invoke | Verified with the .NET SDK; a required gate that fails if `dotnet` is absent |
 | Unity editor / IL2CPP player build | NOT RUN: editor not installed |
 | Unreal (C++ module including `gv_proofs.h`) | NOT RUN: Unreal and a C/C++ compiler not installed |
 | Godot (GDExtension) | NOT RUN: Godot and a C/C++ compiler not installed |

@@ -2,6 +2,7 @@
 //! write-ahead trust journal, pins and open challenges, the evidence ledger, the signed event
 //! feed, the certified archive and standalone fraud packages.
 use crate::config::DurableStorage;
+use crate::durable_writes::{package_suffix, write_package, ArchiveWrites};
 use crate::evidence::{Context, EvidencePackage};
 use crate::io::{OpenError, Outgoing, WitnessOut};
 use gv_core::Digest;
@@ -22,7 +23,6 @@ use std::time::{Duration, Instant};
 
 /// Fraud packages kept in memory for [`crate::ExportQuery::Fraud`] (they are also on disk).
 const MAX_PACKAGES: usize = 256;
-const SAVE_EVERY: Duration = Duration::from_secs(1);
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(500);
 const CHALLENGES_EVERY: Duration = Duration::from_secs(5);
 /// Checkpoint announcements are provisional (the archive holds every epoch): rate-limited.
@@ -58,8 +58,7 @@ pub(crate) struct Persistence {
     evidence_files: u32,
     evidence_bytes: u64,
     persist_ok: bool,
-    dirty: bool,
-    last_save: Option<Instant>,
+    archive_writes: ArchiveWrites,
     last_snapshot: Option<Instant>,
     last_challenges: Option<Instant>,
     last_checkpoint_event: Option<Instant>,
@@ -111,8 +110,7 @@ impl Persistence {
             evidence_files: 0,
             evidence_bytes: 0,
             persist_ok: true,
-            dirty: false,
-            last_save: Some(Instant::now()),
+            archive_writes: ArchiveWrites::new(Instant::now()),
             last_snapshot: None,
             last_challenges: Some(Instant::now()),
             last_checkpoint_event: None,
@@ -159,7 +157,7 @@ impl Persistence {
         pipe: &mut Pipeline<M>,
         sink: &mut Sink<'_>,
     ) {
-        if self.dirty && due(self.last_save, now, SAVE_EVERY) {
+        if self.archive_writes.due(now) {
             self.save_archive(now, sink);
         }
         if due(self.last_challenges, now, CHALLENGES_EVERY) {
@@ -175,22 +173,22 @@ impl Persistence {
             let mut stats = pipe.auditor().stats();
             stats.evidence_files = self.evidence_files;
             stats.evidence_bytes = self.evidence_bytes;
-            stats.persist_ok = self.persist_ok;
+            stats.persist_ok = self.persist_ok && self.archive_writes.healthy();
             sink.events
                 .push_back(PipeEvent::Audit(AuditEvent::Snapshot(stats)));
         }
     }
     pub fn flush(&mut self, sink: &mut Sink<'_>) {
-        if self.dirty {
+        if self.archive_writes.dirty() {
             self.save_archive(Instant::now(), sink);
         }
     }
     fn save_archive(&mut self, now: Instant, sink: &mut Sink<'_>) {
-        if let Err(e) = replace_file(self.storage.base(), self.archive.as_bytes()) {
-            sink.fault(format!("cannot save receipts: {e}"));
+        let result = replace_file(self.storage.base(), self.archive.as_bytes());
+        if let Err(e) = &result {
+            sink.fault(format!("cannot save receipts (will retry): {e}"));
         }
-        self.dirty = false;
-        self.last_save = Some(now);
+        self.archive_writes.record(result.is_ok(), now);
     }
     fn publish(&mut self, event: ExportEvent, sink: &mut Sink<'_>) {
         if let Err(e) = self.feed.append(event) {
@@ -200,14 +198,13 @@ impl Persistence {
     /// Keep a package for export and as a standalone file for offline verification.
     fn keep_package(&mut self, pkg: &EvidencePackage, label: &str) {
         let id = pkg.commitment().id;
-        let file = self
-            .storage
-            .file(&format!(".{label}-{}.package", hex(&id[..4])));
-        match replace_file(&file, pkg.bytes()) {
-            Ok(()) => {
+        let file = self.storage.file(&package_suffix(label, &id));
+        match write_package(&file, pkg.bytes()) {
+            Ok(true) => {
                 self.evidence_files += 1;
                 self.evidence_bytes += pkg.bytes().len() as u64;
             }
+            Ok(false) => {}
             Err(_) => self.persist_ok = false,
         }
         if self.packages.len() < MAX_PACKAGES {
@@ -326,7 +323,7 @@ impl Persistence {
                     sink.fault(format!("cannot record disputed epoch: {e:?}"));
                     self.archive_complete = false;
                 }
-                self.dirty = true;
+                self.archive_writes.mark_dirty();
                 pipe.prune_history();
             }
             _ => self.archive_complete = false,
@@ -347,9 +344,9 @@ impl Persistence {
                 if let Err(e) = self.archive.push(&cert) {
                     sink.fault(format!("cannot encode receipts: {e:?}"));
                 }
-                self.dirty = true;
+                self.archive_writes.mark_dirty();
                 pipe.prune_history();
-                if due(self.last_save, now, SAVE_EVERY) {
+                if self.archive_writes.due(now) {
                     self.save_archive(now, sink);
                 }
             }
@@ -445,8 +442,4 @@ fn recover_auditor<M: StateMachine + Clone>(
         sink.fault(format!("audit recovery not trusted: {:?}", report.recovery));
     }
     Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -26,6 +26,7 @@
 //! makes such an action final.
 #![forbid(unsafe_code)]
 mod config;
+mod durable_writes;
 mod evidence;
 #[cfg(feature = "fault-injection")]
 mod faults;

@@ -12,21 +12,16 @@ cargo test --workspace --all-targets --all-features --locked
 cargo clippy -p gv-wasm --target wasm32-unknown-unknown --locked -- -D warnings
 command -v wasm-pack >/dev/null 2>&1 || { echo "FAIL: wasm-pack is required for the WASM binding tests"; exit 1; }
 (cd adapters/wasm && wasm-pack test --node)
-if command -v node >/dev/null 2>&1; then
-  node scripts/verify-vectors.mjs
-  node scripts/verify-event-codec.mjs
-  node scripts/bench-packing.mjs
-else
-  echo "INFO: Node.js unavailable; independent JS vectors not run"
-fi
+# Every gate below is required: a missing tool is a FAIL, never a silent skip.
+command -v node >/dev/null 2>&1 || { echo "FAIL: Node.js is required for the independent JS vectors"; exit 1; }
+node scripts/verify-vectors.mjs
+node scripts/verify-event-codec.mjs
+node scripts/bench-packing.mjs
 # 2. Compatibility with the newest p2p-net main (Cargo.lock is left unchanged).
 sh scripts/newest-main-compat.sh
-# 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI (explicit gate when dotnet is absent).
+# 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI.
 sh scripts/capi-dotnet-smoke.sh
-# 4. Native host: a real C client of the C ABI (explicit gate when no C compiler), and ThreadSanitizer.
-if command -v "${CC:-cc}" >/dev/null 2>&1; then
-  sh scripts/capi-c-smoke.sh
-else
-  echo "GATE NOT RUN: no C compiler; the C ABI client did not run"
-fi
+# 4. Native host: a real C client of the C ABI, and ThreadSanitizer.
+command -v "${CC:-cc}" >/dev/null 2>&1 || { echo "FAIL: a C compiler is required for the C ABI client"; exit 1; }
+sh scripts/capi-c-smoke.sh
 sh scripts/tsan-linux.sh

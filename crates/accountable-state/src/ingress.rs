@@ -1,9 +1,11 @@
 //! Per-peer ingress budget. A peer that floods cannot make this node spend unbounded memory or
 //! verification time on it, and the refusal is reported to the caller (who can drop the link), never
-//! swallowed. Evidence of misbehavior is exempt from the rate budget: it is size-bounded by its
-//! decoder and is exactly what a hostile peer would want us to drop.
+//! swallowed. Evidence of misbehavior has its own lane, separate from ordinary traffic so a peer
+//! cannot crowd it out, and bounded per sender and node-wide; an identical evidence message seen
+//! again in the same window is not examined twice.
 use crate::io::{Peer, ReceiveError};
-use std::collections::HashMap;
+use sha2::{Digest as _, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Message tag of relayed misbehavior proofs (`PipeMsg::Evidence`).
@@ -26,6 +28,12 @@ pub struct IngressLimits {
     pub messages_per_window: u32,
     pub malformed_per_window: u32,
     pub resume_per_window: u32,
+    /// Evidence messages and bytes one sender may submit per window.
+    pub evidence_per_window: u32,
+    pub evidence_bytes_per_window: usize,
+    /// Evidence messages and bytes the node examines per window from all senders together.
+    pub evidence_total_per_window: u32,
+    pub evidence_total_bytes_per_window: usize,
 }
 
 impl Default for IngressLimits {
@@ -37,6 +45,10 @@ impl Default for IngressLimits {
             messages_per_window: 4096,
             malformed_per_window: 65_536,
             resume_per_window: 32,
+            evidence_per_window: 64,
+            evidence_bytes_per_window: 8 << 20,
+            evidence_total_per_window: 512,
+            evidence_total_bytes_per_window: 64 << 20,
         }
     }
 }
@@ -48,6 +60,8 @@ struct Window {
     messages: u32,
     malformed: u32,
     resume: u32,
+    evidence: u32,
+    evidence_bytes: usize,
 }
 
 impl Window {
@@ -58,6 +72,35 @@ impl Window {
             messages: 0,
             malformed: 0,
             resume: 0,
+            evidence: 0,
+            evidence_bytes: 0,
+        }
+    }
+}
+
+/// Whether an admitted message should be decoded and processed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Admit {
+    Process,
+    /// The same evidence bytes were already examined in this window.
+    Duplicate,
+}
+
+/// Node-wide evidence accounting for one window, with the digests already examined in it.
+struct EvidenceWindow {
+    start: Instant,
+    messages: u32,
+    bytes: usize,
+    seen: HashSet<[u8; 32]>,
+}
+
+impl EvidenceWindow {
+    fn new(start: Instant) -> Self {
+        Self {
+            start,
+            messages: 0,
+            bytes: 0,
+            seen: HashSet::new(),
         }
     }
 }
@@ -66,14 +109,17 @@ pub(crate) struct Ingress {
     limits: IngressLimits,
     clock: Instant,
     peers: HashMap<(bool, [u8; 32]), Window>,
+    evidence: EvidenceWindow,
 }
 
 impl Ingress {
     pub(crate) fn new(limits: IngressLimits) -> Self {
+        let clock = Instant::now();
         Self {
             limits,
-            clock: Instant::now(),
+            clock,
             peers: HashMap::new(),
+            evidence: EvidenceWindow::new(clock),
         }
     }
 
@@ -89,23 +135,54 @@ impl Ingress {
         let clock = self.clock;
         self.peers
             .retain(|_, w| clock.saturating_duration_since(w.start) < window);
+        if clock.saturating_duration_since(self.evidence.start) >= window {
+            self.evidence = EvidenceWindow::new(clock);
+        }
     }
 
-    /// Before decoding: size and bandwidth. Evidence is exempt from the bandwidth budget.
-    pub(crate) fn admit(&mut self, from: Peer, bytes: &[u8]) -> Result<(), ReceiveError> {
+    /// Before decoding: size and bandwidth. Evidence goes through its own lane.
+    pub(crate) fn admit(&mut self, from: Peer, bytes: &[u8]) -> Result<Admit, ReceiveError> {
         if bytes.len() > self.limits.max_message {
             return Err(ReceiveError::TooLarge);
         }
         if bytes.first() == Some(&EVIDENCE_TAG) {
-            return Ok(());
+            return self.admit_evidence(from, bytes);
         }
         let limit = self.limits.bytes_per_window;
         let w = self.window(from);
         w.bytes = w.bytes.saturating_add(bytes.len());
-        refuse_if(w.bytes > limit)
+        refuse_if(w.bytes > limit).map(|()| Admit::Process)
     }
 
-    /// After a successful decode: the message will cost signature work.
+    /// Duplicates cost a hash and nothing else; new evidence is charged to its sender's lane,
+    /// then to the node-wide budget.
+    fn admit_evidence(&mut self, from: Peer, bytes: &[u8]) -> Result<Admit, ReceiveError> {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        if self.evidence.seen.contains(&digest) {
+            return Ok(Admit::Duplicate);
+        }
+        let limits = self.limits;
+        let w = self.window(from);
+        w.evidence = w.evidence.saturating_add(1);
+        w.evidence_bytes = w.evidence_bytes.saturating_add(bytes.len());
+        refuse_if(
+            w.evidence > limits.evidence_per_window
+                || w.evidence_bytes > limits.evidence_bytes_per_window,
+        )?;
+        let total = &mut self.evidence;
+        if total.messages >= limits.evidence_total_per_window
+            || total.bytes.saturating_add(bytes.len()) > limits.evidence_total_bytes_per_window
+        {
+            return Err(ReceiveError::EvidenceSaturated);
+        }
+        total.messages += 1;
+        total.bytes += bytes.len();
+        total.seen.insert(digest);
+        Ok(Admit::Process)
+    }
+
+    /// After a successful decode: the message will cost signature work. Evidence was charged on
+    /// admission.
     pub(crate) fn charge(&mut self, from: Peer, tag: u8) -> Result<(), ReceiveError> {
         if tag == EVIDENCE_TAG {
             return Ok(());

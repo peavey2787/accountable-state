@@ -1,6 +1,6 @@
 use crate::config::{Config, WitnessMode};
 use crate::evidence::{Context, EvidencePackage, ExportQuery};
-use crate::ingress::{Ingress, IngressLimits};
+use crate::ingress::{Admit, Ingress, IngressLimits};
 use crate::io::{OpenError, Outgoing, Output, Peer, ReceiveError, SubmitError, WitnessOut};
 use crate::own::OwnInputs;
 use crate::persist::{Persistence, Sink};
@@ -152,7 +152,9 @@ impl<M: StateMachine + Clone> AccountableState<M> {
 
     /// Bytes from a member's reliable pipeline or from a pinned witness service.
     pub fn receive(&mut self, from: Peer, bytes: &[u8]) -> Result<(), ReceiveError> {
-        self.ingress.admit(from, bytes)?;
+        if self.ingress.admit(from, bytes)? == Admit::Duplicate {
+            return Ok(());
+        }
         let Ok(msg) = PipeMsg::decode(bytes) else {
             return Err(self.ingress.malformed(from));
         };

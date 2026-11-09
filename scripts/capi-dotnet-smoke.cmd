@@ -4,8 +4,8 @@ setlocal
 cd /d "%~dp0.."
 where dotnet >nul 2>nul
 if errorlevel 1 (
-  echo GATE NOT RUN: dotnet SDK unavailable; the .NET/Unity P/Invoke smoke test did not run
-  exit /b 0
+  echo FAIL: the .NET/Unity P/Invoke gate needs the .NET SDK ^(dotnet^)
+  exit /b 1
 )
 cargo build -p gv-capi --locked || exit /b 1
 set "PATH=%CD%\target\debug;%PATH%"

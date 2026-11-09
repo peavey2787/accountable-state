@@ -13,6 +13,7 @@ dependencies = [
  "gv-proof-queue",
  "gv-replay",
  "gv-sig",
+ "sha2 0.10.9",
 ]
 
 [[package]]

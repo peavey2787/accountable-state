@@ -57,7 +57,7 @@ and is not run here.
 ## Concurrency and memory-safety gates
 | Gate | How | Status in this environment |
 | --- | --- | --- |
-| ThreadSanitizer | `scripts/tsan-linux.sh` (nightly, `-Zsanitizer=thread -Zbuild-std`) over the service and worker pool; in `run-all-linux.sh` | runs under WSL; no data races |
+| ThreadSanitizer | `scripts/tsan-linux.sh` (nightly, `-Zsanitizer=thread -Zbuild-std`) over the service and worker pool; in `run-all-linux.sh` and the `tsan` CI job; fails if nightly is absent | runs under WSL; no data races |
 | Miri | `cargo +nightly miri test -p gv-capi` over every `unsafe` function in the C ABI | runs; it found an out-of-bounds read in a test (a short buffer passed where the contract says 32 bytes) and a real leak (a null output pointer leaked the bytes already produced); both fixed. The full suite takes about 20 minutes under Miri because of ML-DSA |
 | AddressSanitizer fuzzing | `cargo fuzz` targets in `fuzz/` | five targets run |
 | Mutation testing | `cargo mutants` over `crates/proof-queue`, `host.rs`, `offload.rs`, the C ABI | surviving mutants are killed with tests, never allow-listed |

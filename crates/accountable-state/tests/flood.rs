@@ -46,7 +46,16 @@ fn limits() -> IngressLimits {
         malformed_per_window: 500,
         bytes_per_window: 1 << 20,
         resume_per_window: 3,
+        evidence_per_window: 5,
+        evidence_bytes_per_window: 1 << 20,
+        evidence_total_per_window: 12,
+        evidence_total_bytes_per_window: 1 << 20,
     }
+}
+
+/// Distinct evidence-tagged messages (malformed past the tag, so each is examined cheaply).
+fn evidence(i: u8) -> [u8; 3] {
+    [11, i, 0]
 }
 
 fn peer(i: usize) -> Peer {
@@ -88,7 +97,7 @@ fn oversize_messages_are_refused_before_decoding() {
 }
 
 #[test]
-fn evidence_is_never_throttled() {
+fn evidence_has_its_own_lane_that_ordinary_traffic_cannot_use_up() {
     let mut n = node("evidence");
     n.set_ingress_limits(limits());
     let ping = PipeMsg::AnchorReq.encode().unwrap();
@@ -98,7 +107,78 @@ fn evidence_is_never_throttled() {
     assert_eq!(n.receive(peer(1), &ping), Err(ReceiveError::Throttled));
     // A message tagged as evidence is examined (and here found malformed), not dropped by the budget.
     assert_eq!(
-        n.receive(peer(1), &[11, 0, 0]),
+        n.receive(peer(1), &evidence(0)),
+        Err(ReceiveError::Malformed)
+    );
+}
+
+#[test]
+fn an_evidence_flood_is_bounded_per_sender_while_other_senders_still_progress() {
+    let mut n = node("evidence-flood");
+    n.set_ingress_limits(limits());
+    let results: Vec<_> = (0..100).map(|i| n.receive(peer(1), &evidence(i))).collect();
+    assert!(results[..5]
+        .iter()
+        .all(|r| *r == Err(ReceiveError::Malformed)));
+    assert!(results[5..]
+        .iter()
+        .all(|r| *r == Err(ReceiveError::Throttled)));
+    assert_eq!(
+        n.receive(peer(2), &evidence(200)),
+        Err(ReceiveError::Malformed),
+        "another sender's evidence is still examined"
+    );
+    let later = Instant::now() + Duration::from_secs(2);
+    while n.poll(later).is_some() {}
+    assert_eq!(
+        n.receive(peer(1), &evidence(201)),
+        Err(ReceiveError::Malformed)
+    );
+}
+
+#[test]
+fn repeated_evidence_is_examined_once_per_window_and_costs_no_budget() {
+    let mut n = node("evidence-dup");
+    n.set_ingress_limits(limits());
+    assert_eq!(
+        n.receive(peer(1), &evidence(7)),
+        Err(ReceiveError::Malformed)
+    );
+    for _ in 0..100 {
+        assert_eq!(n.receive(peer(1), &evidence(7)), Ok(()));
+        assert_eq!(n.receive(peer(2), &evidence(7)), Ok(()));
+    }
+    for i in 0..4 {
+        assert_eq!(
+            n.receive(peer(1), &evidence(i)),
+            Err(ReceiveError::Malformed)
+        );
+    }
+}
+
+#[test]
+fn the_node_wide_evidence_budget_saturates_explicitly_and_recovers_next_window() {
+    let mut n = node("evidence-total");
+    n.set_ingress_limits(limits());
+    let senders = [peer(0), peer(1), peer(2), Peer::Witness([9; 32])];
+    let mut results = Vec::new();
+    for i in 0..5u8 {
+        for (s, from) in senders.iter().enumerate() {
+            results.push(n.receive(*from, &evidence(i * 4 + s as u8)));
+        }
+    }
+    let examined = results
+        .iter()
+        .filter(|r| **r == Err(ReceiveError::Malformed))
+        .count();
+    assert_eq!(examined, 12);
+    assert!(results[12..]
+        .iter()
+        .all(|r| *r == Err(ReceiveError::EvidenceSaturated)));
+    let later = Instant::now() + Duration::from_secs(2);
+    while n.poll(later).is_some() {}
+    assert_eq!(
+        n.receive(peer(2), &evidence(99)),
         Err(ReceiveError::Malformed)
     );
 }

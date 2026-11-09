@@ -76,7 +76,11 @@ pub enum ReceiveError {
     NotAllowedFromWitness,
     /// Larger than the configured maximum message; not decoded.
     TooLarge,
-    /// The sender exceeded its per-window budget. Nothing was lost that matters: evidence is
-    /// never throttled. The host may slow or drop that link.
+    /// The sender exceeded its per-window budget (ordinary traffic, or its own evidence lane).
+    /// The host may slow or drop that link.
     Throttled,
+    /// The node-wide evidence budget for this window is spent; the evidence was not examined.
+    /// Each sender's evidence lane is far smaller than this budget, so one peer cannot fill it.
+    /// Retry in the next window.
+    EvidenceSaturated,
 }

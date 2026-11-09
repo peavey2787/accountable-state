@@ -18,15 +18,16 @@ if errorlevel 1 (
 pushd adapters\wasm
 wasm-pack test --node || (popd & exit /b 1)
 popd
+REM Every gate below is required: a missing tool is a FAIL, never a silent skip.
 where node >nul 2>nul
 if errorlevel 1 (
-  echo INFO: Node.js unavailable; independent JS vectors not run
-) else (
-  node scripts\verify-vectors.mjs || exit /b 1
-  node scripts\verify-event-codec.mjs || exit /b 1
-  node scripts\bench-packing.mjs || exit /b 1
+  echo FAIL: Node.js is required for the independent JS vectors
+  exit /b 1
 )
+node scripts\verify-vectors.mjs || exit /b 1
+node scripts\verify-event-codec.mjs || exit /b 1
+node scripts\bench-packing.mjs || exit /b 1
 REM 2. Compatibility with the newest p2p-net main (Cargo.lock is left unchanged).
 call scripts\newest-main-compat.cmd || exit /b 1
-REM 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI (explicit gate when dotnet is absent).
+REM 3. Engine host smoke: Unity-style .NET P/Invoke of the C ABI.
 call scripts\capi-dotnet-smoke.cmd || exit /b 1

@@ -60,3 +60,52 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: call scripts\newest-main-compat.cmd
+  # Supplemental release gates, each a required job of its own so a missing tool is a failure.
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo install wasm-pack --locked
+      - run: cargo clippy -p gv-wasm --target wasm32-unknown-unknown --locked -- -D warnings
+      - run: wasm-pack test --node
+        working-directory: adapters/wasm
+  capi-hosts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: .NET P/Invoke host
+        if: runner.os != 'Windows'
+        run: sh scripts/capi-dotnet-smoke.sh
+      - name: .NET P/Invoke host
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: call scripts\capi-dotnet-smoke.cmd
+      - name: C client (warnings as errors)
+        if: runner.os != 'Windows'
+        run: sh scripts/capi-c-smoke.sh
+  tsan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: sh scripts/tsan-linux.sh

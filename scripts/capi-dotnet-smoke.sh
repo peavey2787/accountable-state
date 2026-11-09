@@ -3,8 +3,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 if ! command -v dotnet >/dev/null 2>&1; then
-  echo "GATE NOT RUN: dotnet SDK unavailable; the .NET/Unity P/Invoke smoke test did not run"
-  exit 0
+  echo "FAIL: the .NET/Unity P/Invoke gate needs the .NET SDK (dotnet)"
+  exit 1
 fi
 cargo build -p gv-capi --locked
 LD_LIBRARY_PATH="$PWD/target/debug:${LD_LIBRARY_PATH:-}" \

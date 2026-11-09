@@ -20,6 +20,7 @@ gv-edge = { path = "../edge" }
 gv-replay = { path = "../replay" }
 gv-proof-queue = { path = "../proof-queue" }
 gv-sig = { path = "../sig" }
+sha2 = { workspace = true }
 gv-p2p = { path = "../../adapters/p2p", features = ["native"], optional = true }
 
 [dev-dependencies]
