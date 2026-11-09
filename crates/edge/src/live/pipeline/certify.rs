@@ -14,6 +14,10 @@ use gv_core::ParticipantId;
 
 /// Checkpoints kept for epochs this participant has not reached yet, per roster member.
 const EARLY_PER_MEMBER: usize = 16;
+/// How often an epoch still waiting for signatures sends this participant's part of it again.
+/// Well inside any close timeout, so a peer that lost my batch completes the full set before it
+/// could close the epoch without me (an honest signer never signs two sets for one epoch).
+const RESEND_EVERY_TICKS: u64 = 10;
 
 pub(super) enum Stage {
     Collect,
@@ -31,6 +35,8 @@ pub(super) struct Certify {
     inputs: Vec<Option<SignedEventBatch>>,
     previous_state: Vec<u8>,
     received: Vec<SignedCheckpoint>,
+    /// Tick this participant's batch and checkpoint for the epoch were last sent.
+    sent_at: u64,
     /// Signers whose claim replay proved false.
     liars: Vec<ParticipantId>,
     /// Signers whose differing claim has already been examined.
@@ -80,6 +86,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             inputs,
             previous_state,
             received: Vec::new(),
+            sent_at: now,
             liars: Vec::new(),
             judged: Vec::new(),
         });
@@ -136,6 +143,28 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             tick: v.tick,
             evidence,
         }));
+    }
+
+    /// Consensus messages are sent once over a network that may lose them: while the epoch
+    /// waits for signatures, send my batch and checkpoint for it again. They are the same signed
+    /// messages, so a peer that already has them ignores the copies.
+    pub(super) fn resend_unsettled(&mut self, now: u64) {
+        let mine = self.session.roster.index_of(&self.me);
+        let Stage::Certify(c) = &mut self.stage else {
+            return;
+        };
+        if now < c.sent_at + RESEND_EVERY_TICKS {
+            return;
+        }
+        c.sent_at = now;
+        // A sealed epoch's batches travel only as reveals; resending them in the clear would leak.
+        let batch = mine
+            .filter(|_| !c.sealed)
+            .and_then(|slot| c.inputs.get(slot).cloned().flatten());
+        let checkpoint = PipeMsg::Checkpoint(c.sent.clone());
+        for msg in batch.map(PipeMsg::Batch).into_iter().chain([checkpoint]) {
+            self.enqueue(Outgoing::all(msg));
+        }
     }
 
     // ---- receiving checkpoints ------------------------------------------------

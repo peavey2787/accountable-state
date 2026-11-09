@@ -177,10 +177,14 @@ impl<R: StateMachine + Clone> Pipeline<R> {
             return;
         }
         let before = self.ws();
-        self.replica.discard_pending();
         for cert in epochs {
             if cert.evidence.accused.claim.epoch_start != self.ws() {
                 continue; // already have it, or a gap this peer cannot fill
+            }
+            // Only an epoch that continues the head replaces the in-flight one: a late or
+            // duplicated reply that brings nothing new must not drop the epoch being certified.
+            if self.ws() == before {
+                self.replica.discard_pending();
             }
             if let Err(e) = self.replica.apply_certified(cert) {
                 self.fault(format!("synced epoch rejected: {e:?}"));

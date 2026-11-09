@@ -128,6 +128,38 @@ fn a_grace_period_expiry_is_reported_but_never_a_violation() {
     assert!(n.violations(0).is_empty());
 }
 
+#[test]
+fn a_sync_reply_that_brings_nothing_new_keeps_the_epoch_being_certified() {
+    let mut n = trio();
+    n.run(40);
+    let ids: Vec<_> = n.cast.keys.iter().map(gv_sig::SigningKey::id).collect();
+    n.peers[0].pipe.peer_up(ids[1]);
+    let nonce = challenge_nonce(&mut n, 0);
+    let p = SignedProof::sign(MATCH, 5, [9; 16], 0, nonce, &n.cast.keys[1]);
+    n.inject(0, 1, PipeMsg::Resume(ResumeMsg::Proof(p)));
+    // A late or duplicated reply that adds no epoch arrives at every tick, mid-certification.
+    for _ in 0..200 {
+        let tip = n.peers[0].pipe.verified_tick();
+        n.inject(
+            0,
+            1,
+            PipeMsg::Resume(ResumeMsg::Epochs {
+                epochs: vec![],
+                tip,
+            }),
+        );
+        n.run(1);
+    }
+    let faults: Vec<_> = n.peers[0]
+        .events
+        .iter()
+        .filter(|(_, e)| matches!(e, PipeEvent::Fault(_)))
+        .collect();
+    assert!(faults.is_empty(), "{faults:?}");
+    assert!(n.peers[0].pipe.verified_tick() >= 150, "play went on");
+    assert!(n.violations(0).is_empty());
+}
+
 /// The nonce of the challenge peer `i` just queued (the test plays the remote side).
 fn challenge_nonce(n: &mut Net, i: usize) -> [u8; 16] {
     std::iter::from_fn(|| n.peers[i].pipe.poll_outbox())

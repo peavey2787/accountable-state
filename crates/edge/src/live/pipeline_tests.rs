@@ -458,6 +458,32 @@ fn a_silent_member_is_closed_out_by_the_rotating_coordinator() {
     assert!(n.violations(0).is_empty(), "never a conclusive verdict");
 }
 
+#[test]
+fn a_lost_batch_is_sent_again_before_the_close_could_leave_its_signer_out() {
+    // Peer 2's batch for the epoch at 40 is lost; peer 2 itself has every batch and certifies the
+    // full set. A close without it would be a set peer 2 never signs: a unanimous session stalls.
+    let mut cfg = config();
+    cfg.close_after_ticks = Some(60);
+    let mut n = net(vec![busy(1, 900), busy(2, 900), busy(3, 900)], cfg, 2);
+    n.drop = Box::new(|from, _, o| {
+        from == 2 && matches!(&o.msg, PipeMsg::Batch(b) if b.record.start_tick == 40)
+    });
+    n.run(70);
+    n.drop = Box::new(|_, _, _| false);
+    n.run(500);
+    for i in 0..3 {
+        let faults: Vec<_> = n.peers[i]
+            .events
+            .iter()
+            .filter(|(_, e)| matches!(e, PipeEvent::Fault(_)))
+            .collect();
+        assert!(faults.is_empty(), "peer {i}: {faults:?}");
+        assert!(n.violations(i).is_empty());
+        assert!(n.peers[i].pipe.verified_tick() >= 400, "peer {i} went on");
+    }
+    assert!(n.agree(&[0, 1, 2]));
+}
+
 // ---- accountability (PeerReview-style) ------------------------------------
 
 fn statuses(n: &Net, i: usize) -> Vec<Status> {

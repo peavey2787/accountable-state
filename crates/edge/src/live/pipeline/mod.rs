@@ -192,6 +192,7 @@ impl<R: StateMachine + Clone> Pipeline<R> {
         self.drive_sealed(now, own);
         self.drain_future(now, own);
         self.maybe_close(now);
+        self.resend_unsettled(now);
         self.expire_grace(now);
         if std::mem::take(&mut self.epoch_done) {
             self.auditor.on_epoch(now);
